@@ -1,0 +1,1277 @@
+---
+title: "carpophilus_metabarcoding"
+author: "Alexander Piper"
+date: "28/08/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Knitr global setup - change eval to true to run code
+
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.show = "hold", fig.keep = "all")
+opts_knit$set(root.dir = 'C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding')
+setwd('C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding')
+opts_chunk$set(dev = 'png')
+```
+
+# Introduction 
+
+# Demultiplex samples using illumina indexes
+
+BASH:
+```{bash demultiplex 1 mismatch}
+###BASH###
+
+#raise amount of available file handles
+ulimit -n 4000
+
+#Miseq Run 1 - Testing Primers
+/home/ap0y/usr/local/bin/bcl2fastq -p 12 --runfolder-dir /group/sequencing/190331_M03633_0310_000000000-CB3DR  --output-dir /group/pathogens/Alexp/Metabarcoding/Run1_primertest --sample-sheet /group/pathogens/Alexp/Metabarcoding/Run1_primertest/SampleSheet_primertest.csv --no-lane-splitting --barcode-mismatches 0
+
+
+#Miseq Run 2 - Testing replicate tagged primers & SynMock
+/home/ap0y/usr/local/bin/bcl2fastq -p 12 --runfolder-dir /group/sequencing/190628_M03633_0331_000000000-CK3HD  --output-dir /group/pathogens/Alexp/Metabarcoding/Run2_reptest --sample-sheet /group/pathogens/Alexp/Metabarcoding/Run2_reptest/SampleSheet_reptest.csv --no-lane-splitting --barcode-mismatches 0
+
+#Miseq Run 3 - Ladder spike ins
+/home/ap0y/usr/local/bin/bcl2fastq -p 12 --runfolder-dir /group/sequencing/190722_M03633_0336_000000000-CJKFJ/  --output-dir /group/pathogens/Alexp/Metabarcoding/Run3_spikein --sample-sheet /group/pathogens/Alexp/Metabarcoding/Run3_spikein/SampleSheet_run3.csv --no-lane-splitting --barcode-mismatches 0
+```
+
+
+#Implement savr quality chekc
+
+https://www.bioconductor.org/packages/release/bioc/vignettes/savR/inst/doc/savR.pdf
+
+# Calculate index switch rate
+
+While using unique dual-indices will allow detection and removal of the majority of index switch reads, there will still be low level undetectable index switching present at a rate of obs/exp^2 (ref- ). to determine this rate, we will first calculate the unexpected index combinations compared to the expected. 
+
+Fastq files contain the index information for each read in the read header, and therefore to get all undetermined indices, both switched and otherwise erroneous we can summarise the index sequences for each read as contained in the fasta header:
+
+@M03633:307:000000000-D4262:1:1101:19524:28535 1:N:0:**GAGACGAT+GTTCTCGT**
+ATACTGTGCGTACTGCAGATCGGAAGAGCACACGTCTGAACTCCAGTCACGAGACGATATCTCGTATGCCGTCTT 
++ 
+BBBB?FFFBABAEGGGGGGGGGGGGGFHHHHHHGHHHGHHHHHHHHHHHHGGEEEEEAFGGHGHFAHHHHGGGH
+
+
+First we need to demultiplex the data again allowing no mismatches - This needs to be done with bcl2fastq rather than the default illumina miseq lociratefastq workflow, as the workflow doesnt include indices in fastq file headers
+
+## Install and load packages
+```{r install & Load packages} 
+#Set required packages
+.cran_packages <- c("ggplot2", "gridExtra","tidyverse","scales","stringdist","patchwork","vegan","ggpubr","seqinr","viridis")
+.bioc_packages <- c("dada2", "phyloseq", "DECIPHER","Biostrings","ShortRead","psadd","ggridges")
+#.github_packages <- c("metacal", "taxreturn", "piperline")
+
+#.inst <- .cran_packages %in% installed.packages()
+#if(any(!.inst)) {
+#   install.packages(.cran_packages[!.inst])
+#}
+#.inst <- .bioc_packages %in% installed.packages()
+#if(any(!.inst)) {
+#  if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#  BiocManager::install(.bioc_packages[!.inst], ask = F)
+#}
+#
+#Load all packages
+sapply(c(.cran_packages,.bioc_packages), require, character.only = TRUE)
+
+#Load helper functions 
+library(taxreturn)
+library(speedyseq)
+library(metacal)
+
+#devtools::install_github("benjjneb/dada2")
+
+source("scripts/helper_functions.R")
+
+```
+
+
+
+Then we can summarise the switch rate by counting unassigned reads
+
+```{bash undetermined}
+###BASH###
+#Run 1
+#summarise undetermined reads from R1 undetermined file
+zcat Undetermined_S0_R1_001.fastq.gz | grep '^@M03633' | cut -d : -f 10 | sort | uniq -c | sort -nr > undetermined.txt
+
+# summarise correctly determined reads from all other R1 files 
+rm determined.txt
+ls | grep "R1_001.fastq.gz" | sort | grep -v 'Undetermined' > test_ls_F
+
+let files=$(grep -c "fastq.gz" test_ls_F)
+
+declare -i x
+
+x=1
+while [ $x -le $files ] 
+    do
+
+query=$(sed -n "${x}p" test_ls_F)
+
+sample_name=$(echo $query | awk -F . '{ print $1}')
+
+stats=$(zcat $(echo $query) | grep '^@M03633' | wc -l)
+echo $query $stats >> determined.txt
+
+let x=x+1
+
+done 
+
+```
+
+To differentiate unused indices arising from switching, from unused indices arrising from other phenomena, we can compare the undetermined count file to all possible combinations of i5 and i7 indices that could be produced through switching 
+
+```{r index switching, eval=TRUE}
+#Read in original sample sheet
+SampleSheet <- read_csv("Run3_spikein/SampleSheet_run3.csv",skip=20)
+
+##For special case of popgen spikein
+SampleSheet <- read_csv("Run3_spikein/SampleSheet_run3.csv",skip=20)  %>%
+  filter(str_detect(Sample_Name,pattern="-"))
+
+##enumerate 1 mismatch to all indices to mimic demultiplexing with a single mismatch
+
+I7_Index_ID <- SampleSheet$index
+I5_Index_ID  <- SampleSheet$index2
+
+#Create all possible switched combinations
+combos <- unique(expand.grid(I7_Index_ID, I5_Index_ID))
+combos$indices <- paste0(combos$Var1,"+",combos$Var2)
+
+#Determined reads from mock communities
+determined <- read_table2("Run3_spikein/determined.txt",col_names = FALSE)
+colnames(determined) <- c("Sample_Name","count")
+determined$Sample_Name <- determined$Sample_Name %>%
+  str_split_fixed("_S",n=2)
+determined$Sample_Name <- determined$Sample_Name[,1]
+determined <- left_join(determined, SampleSheet, by="Sample_Name") 
+determined$indices <- paste0(determined$index, "+",determined$index2)
+determined <- determined %>%
+  subset(select=c("Sample_Name","count","indices"))
+head(determined)
+
+#Undetermined reads from mock communities
+undetermined <- read_table("Run3_spikein/undetermined.txt",col_names = FALSE)
+colnames(undetermined) <- c("count","indices")
+undetermined$Sample_Name <- "Undetermined_S0_R1_001.fastq.gz"
+head(undetermined)
+
+indices <- rbind(determined,undetermined)
+
+#Calculate total read count for run
+total_reads <- sum(indices$count)
+
+#get unused combinations resulting from index switching
+switched <- left_join(combos,indices,by="indices") %>%
+  drop_na()
+colnames(switched) <- c("i7","i5","indices","Sample_Name","count")
+
+#get unused combinations resulting from other phenomena
+other <- indices[!indices$indices %in% combos$indices, ]
+
+#Count number of other undetermined
+other_reads <- sum(other$count)
+
+##Summary of index switching rate
+exp_rate <- switched %>% 
+  filter(!str_detect(Sample_Name,"Undetermined"))
+obs_rate <- switched %>% 
+  filter(str_detect(Sample_Name,"Undetermined"))
+
+switch_rate <- (sum(obs_rate$count)/sum(exp_rate$count))
+message(switch_rate)
+
+#Rate of undetected switching should be switch_rate squared
+filt_threshold <- switch_rate^2
+message(paste0("The threshold for filtering will be: ",filt_threshold))
+
+#Plot switching
+
+gg.switch <- ggplot(data = switched, aes(x = i7, y = i5), stat="identity") +
+  geom_tile(aes(fill = count),alpha=0.8)  + scale_fill_viridis(name = "reads", begin=0.1,trans = "log10")  + 
+  theme(axis.text.x = element_text(angle=90, hjust=1), plot.title=element_text(hjust = 0.5), plot.subtitle =element_text(hjust = 0.5), legend.position = "none") +
+  labs(title= "Run3_spikeins", subtitle = paste0("Total Reads: ", total_reads, " Switch rate: ", sprintf("%1.2f%%", switch_rate*100)))
+
+
+#Plot pooling
+
+gg.pooling <- ggplot(data=determined, aes(x=fct_rev(Sample_Name),y=count),stat="identity") + 
+  geom_bar(aes(fill=count),stat="identity")  + 
+  scale_fill_viridis(name = "reads", begin=0.1) + 
+  theme(axis.text.x = element_text(angle=90, hjust=1), plot.title=element_text(hjust = 0.5), plot.subtitle =element_text(hjust = 0.5))+ 
+  geom_hline(aes(yintercept = mean(count)))  +
+  xlab("Sample")+
+  ylab("number of reads") +
+  labs(title= "Pooling", subtitle = paste0("Total Reads: ", total_reads, " Average reads: ",  sprintf("%.0f",mean(determined$count))," Standard deviation: ", sprintf("%.0f",sd(determined$count)))) +
+  coord_flip()
+
+
+##Special case - plot pooling of popgen spiked
+
+popgen <- determined %>%
+  filter(!str_detect(Sample_Name,pattern="-"))
+
+gg.popgen <- ggplot(data=popgen, aes(x=fct_rev(Sample_Name),y=count),stat="identity") + 
+  geom_bar(aes(fill=count),stat="identity")  + 
+  scale_fill_viridis(name = "reads", begin=0.1) + 
+  theme(axis.text.x = element_text(angle=90, hjust=1), plot.title=element_text(hjust = 0.5), plot.subtitle =element_text(hjust = 0.5))+ 
+  geom_hline(aes(yintercept = mean(count)))  +
+  xlab("Synthetic sample")+
+  ylab("number of reads") +
+  #labs(title= "Pooling", subtitle = paste0("Total Reads: ", total_reads, " Average reads: ",  #sprintf("%.0f",mean(determined$count))," Standard deviation: ", sprintf("%.0f",sd(determined$count)))) +
+  coord_flip()
+
+
+```
+
+
+# Demultiplex by primer & trim
+
+DADA2 requires Non-biological nucleotides i.e. primers, adapters, linkers, etc to be removed. Prior to begining this workflow, samples were demultiplexed and illumina adapters were removed by the MiSeq software, however primer sequences still remain in the reads and must be removed prior to use with the DADA2 algorithm.
+
+In this study there were 2 amplicons of different size, and 3 different replicate primers of each. For this workflow we will be using the Kmer based adapter trimming software BBDuk (Part of BBTools package https://jgi.doe.gov/data-and-tools/bbtools/) to trim the primers from our raw data files.
+
+## fwhF2-fwhR2n amplicon:
+
+FORWARD PRIMERS:
+    Name                    Illumina overhang adapter           Primer sequences
+    fwhF2T1_P5	ACACTCTTTCCCTACACGACGCTCTTCCGATCT	  GAGGDACWGGWTGAACWGTWTAYCCHCC
+    fwhF2T2_P5	ACACTCTTTCCCTACACGACGCTCTTCCGATCT	 TGTGGDACWGGWTGAACWGTWTAYCCHCC
+    fwhF2T3_P5	ACACTCTTTCCCTACACGACGCTCTTCCGATCT	AGAAGGDACWGGWTGAACWGTWTAYCCHCC
+    
+REVERSE PRIMERS:
+    Name                    Illumina overhang adapter           Primer sequences
+    fwhR2nT1_P7	GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT	ACGTRATWGCHCCDGCTARWACWGG
+    fwhR2nT2_P7	GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT	TCCGTRATWGCHCCDGCTARWACWGG
+    fwhR2nT3_P7	GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT	CTGCGTRATWGCHCCDGCTARWACWGG
+    
+```{r Demultiplex,message=FALSE}
+#Install bbmap
+bbmap_install()
+
+#Demultiplex samples
+
+runs <- dir("data/", pattern="run3")
+path <- paste0("data/",runs[i]) # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+
+demuxpath <- file.path(path, "demux") # Filtered forward files go into the path/filtered/ subdirectory
+dir.create(demuxpath)
+
+fastqFs <- sort(list.files(path, pattern="R1_001.*", full.names = TRUE))
+fastqRs <- sort(list.files(path, pattern="R2_001.*", full.names = TRUE))
+
+
+bbtools_demux(install="bin/bbmap", fwds=fastqFs, revs=fastqRs,Fbarcodes = c("GAGGDACW","TGTGGDAC","AGAAGGDAC"),
+              Rbarcodes = c("ACGTRATW","TCCGTRAT","CTGCGTRA"),copyundefined=TRUE, outpath=demuxpath,hdist=0, overwrite=TRUE)
+
+demux_fastqs <- sort(list.files(paste0(demuxpath), pattern="_R1R2_", full.names = TRUE))
+
+
+bbtools_trim(install="bin/bbmap", fwd=demux_fastqs,primers=c("GGDACWGGWTGAACWGTWTAYCCHCC","GTRATWGCHCCDGCTARWACWGG"), copyundefined=TRUE, outpath="trimmed",ktrim="l", ordered=TRUE,mink=FALSE, hdist=2,maxlength=140, overwrite=TRUE)
+
+#Re-split interleaved fastq's
+
+trimmedpath <- file.path(demuxpath, "trimmed") # Filtered forward files go into the path/filtered/ subdirectory
+trimmed_fastqs <- sort(list.files(trimmedpath, pattern="_R1R2_", full.names = TRUE))
+
+bbtools_split(install="bin/bbmap",files=trimmed_fastqs, overwrite=TRUE)
+
+
+#test deal with qualities
+
+#aqhist.txt <- average read quality
+#qhist.txt <- read quality across length
+#bhist <- base pair composition
+#gchist <- read gc content
+#lhist <- length histogram
+
+qual <- read_table2("qhist.txt")
+#Plot read 1 qualities
+plot(qual$Read1_linear)
+#plot read 2 qualities
+plot(qual$fraction2)
+
+
+```
+
+
+## Error visualisation
+
+We start by visualizing the quality profiles of the forward read and reverse reads for each run:
+
+
+## Sequence quality control
+
+Options here - if using LINUX/MAC do fastqcr - If using windows use shortrread
+
+```{r }
+library(ShortRead)
+
+runs <- dir("data/", pattern="run3")
+
+for (i in seq(along=runs)){
+path <- paste0("data/",runs[i],"/demux/trimmed/") # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+
+  #path <- paste0("data/",runs[i])
+
+#Plot number of reads
+dat <- as.data.frame(countLines(dirPath=path, pattern=".fastq")) %>%
+  rownames_to_column()  %>%
+   `colnames<-`(c("Sample", "Reads")) %>%
+  filter(str_detect(Sample,"R1"))
+
+#Plot pooling
+
+gg.pooling <- ggplot(data=dat, aes(x=Sample,y=Reads),stat="identity") + 
+  geom_bar(aes(fill=Reads),stat="identity")  + 
+  scale_fill_viridis(name = "Reads", begin=0.1) + 
+  theme(axis.text.x = element_text(angle=90, hjust=1), plot.title=element_text(hjust = 0.5), plot.subtitle =element_text(hjust = 0.5))+ 
+  geom_hline(aes(yintercept = mean(Reads)))  +
+  xlab("sample name")+
+  ylab("Number of reads") + 
+  labs(title= "Pooling", subtitle = paste0("Total Reads: ", sum(dat$Reads), " Average reads: ",  sprintf("%.0f",mean(dat$Reads))," Standard deviation: ", sprintf("%.0f",sd(dat$Reads)))) +
+  coord_flip()
+
+# Put in a check for operating system here 
+sys <- Sys.info()[['sysname']]
+
+#if (sys == "Mac") send to fastqcr 
+#if (sys == "Windows") send to Shortread
+  
+# Plot quality stat using shortread
+
+#fls <- dir(path, "fastq.gz", full=TRUE)
+
+fastqFs <- sort(list.files(path, pattern="R1_001.*", full.names = TRUE))
+fastqRs <- sort(list.files(path, pattern="R2_001.*", full.names = TRUE))
+
+fls <- fastqRs[30:40]
+
+coll <- QACollate(QAFastqSource(fls), QAReadQuality(),
+    QAAdapterContamination(), QANucleotideUse(),
+    QAQualityUse(), QASequenceUse(),
+    QAFrequentSequence(n=10), QANucleotideByCycle(),
+    QAQualityByCycle())
+x <- qa2(coll, BPPARAM=SerialParam(), verbose=TRUE)
+
+res <- report(x)
+if (interactive()) browseURL(res)  
+
+
+#fastqFs <- sort(list.files(path, pattern="R1_001.*", full.names = TRUE))
+#fastqRs <- sort(list.files(path, pattern="R2_001.*", full.names = TRUE))
+# p1 <- plotQualityProfile(fastqFs[50:60]) + ggtitle(paste0(runs[i]," Forward Reads"))
+#  p2 <- plotQualityProfile(fastqRs[1:4]) + ggtitle(paste0(runs[i]," Reverse Reads"))
+#  print(p1+p2)
+}
+```
+
+
+In gray-scale is a heat map of the frequency of each quality score at each base position. The median quality score at each position is shown by the green line, and the quartiles of the quality score distribution by the orange lines. The red line shows the scaled proportion of reads that extend to at least that position (this is more useful for other sequencing technologies, as Illumina reads are typically all the same lenghth, hence the flat red line).
+
+The forward reads are good quality. We generally advise trimming the last few nucleotides to avoid less well-controlled errors that can arise there. These quality profiles do not suggest that any additional trimming is needed. We will truncate the forward reads at position 240 (trimming the last 10 nucleotides).
+
+The reverse reads are of significantly worse quality, especially at the end, which is common in Illumina sequencing. This isn’t too worrisome, as DADA2 incorporates quality information into its error model which makes the algorithm robust to lower quality sequence, but trimming as the average qualities crash will improve the algorithm’s sensitivity to rare sequence variants. Based on these profiles, we will truncate the reverse reads at position 160 where the quality distribution crashes.
+
+## Filter and trim
+
+The forward reads for the hemiptera metabarcoding data are of good quality, while The reverse reads are of slightly worse worse quality at the end, which is common in Illumina sequencing. Informed by these profiles, we will use the Truncate quality function (TruncQ=2) to cut the reads at any point the Q score crashes below 2.
+
+the maxEE should be used as the primary quality filter. TruncQ is mostly to remove very low quality sequences
+
+In general pick truncLen parameters that avoid the worst parts of the quality profiles but ensure that enough sequence is kept to healthily overlap (truncLen[[1]] + truncLen[[2]] > amplicon_length+25), leave truncQ=2, and try a couple maxEE values until I get a satisfactory number of reads through the filter
+
+
+## Qual vs MaxEE plot - Can we make this with the output of Shortreads QA instead
+
+To help visualise the effects of filtering, it can be helpful to use a read quality VS maxEE plot
+
+To get the data for this plot, firstly the following code needs to be run in BASH on the primer trimmed reads:
+
+NOTE: Combine this code into the initial BBDuk Setup so we arent bouncing back and forth
+
+NOTE: Make this work in linux with fastqcr
+
+```{r fastqc}
+library(fastqcr)
+fastqc_installer() #My custom function
+
+
+runs <- dir("data/", pattern="run3")
+path <- paste0("data/",runs[i],"/test") # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+
+fastqFs <- sort(list.files(path, pattern="R1_*", full.names = TRUE,recursive=TRUE))
+
+fastqc_local(fq.dir=path,fastqc.path = "C:/FastQC")
+
+
+qc <- qc_aggregate(qc.dir="C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding/data/run3_spikein/test/")
+qc
+
+# Inspecting QC Problems
+
+# See which modules failed in the most samples
+qc_fails(qc, "module")
+# Or, see which samples failed the most
+qc_fails(qc, "sample")
+
+
+# Building Multi QC Reports
+qc_report("C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding/data/run3_spikein/test/", result.file = "C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding/multi-qc-report" )
+
+# Building One-Sample QC Reports (+ Interpretation)
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+qc.file <- system.file("fastqc_results", "S1_fastqc.zip", package = "fastqcr")
+qc_report(qc.file, result.file = "one-sample-report",
+          interpret = TRUE)
+
+```
+
+Once fastQC has been run - In R Run the following to make the plot:
+
+```{r qual vs maxEE plot}
+runs <- dir("data/", pattern="run2")
+
+for (i in seq(along=runs)){
+path <- paste0("data/",runs[i],"/fastqc") # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+
+#Grab 5 random samples to plot quality
+QualF <- sample(sort(list.files(path, pattern=".qualF.csv", full.names = TRUE)),20)
+QualR <- QualF %>% 
+  str_replace(".qualF.csv",".qualR.csv") %>%
+  str_replace("R1_001","R2_001")
+
+pdf(paste(path,"/QualPlots.pdf", sep=""),onefile=T, width=20, height=20)
+for (q in seq(along=QualF)){
+  fastq.r1 <- read.csv(file=QualF[q], sep = "\t", header = TRUE)
+  fastq.r2 <- read.csv(file=QualR[q], sep = "\t", header = TRUE)
+
+  p1 <- qualMaxEEplot(fastq.r1 = fastq.r1, fastq.r2 = fastq.r2,name1= QualF[q], name2=QualR[q])
+  print(p1)
+}
+dev.off()
+}
+
+```
+
+```{r filter and trim}
+##Note - for filtering stage, these parameters may not be optimal for each run or testset, use the previous plotting step to inform this
+runs <- dir("data/", pattern="run3")
+filtered_out <- list()
+
+for (i in seq(along=runs)){
+  path <- paste0("data/",runs[i],"/demux/trimmed/") # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+  filtpath <- file.path(path, "filtered") # Filtered forward files go into the path/filtered/ subdirectory
+  dir.create(filtpath)
+  fastqFs <- sort(list.files(path, pattern="R1_001.*"))
+  fastqRs <- sort(list.files(path, pattern="R2_001.*"))
+  
+  if(length(fastqFs) != length(fastqRs)) stop(paste0("Forward and reverse files for ",runs[i]," do not match."))
+  
+  filtered_out[[i]] <- (filterAndTrim(fwd=file.path(path, fastqFs), filt=file.path(filtpath, fastqFs),
+                                      rev=file.path(path, fastqRs), filt.rev=file.path(filtpath, fastqRs),
+                                      maxEE=2, truncQ=15, maxN = 0,trimLeft = c(51,0), truncLen = 125,
+                                      rm.phix=TRUE, compress=TRUE, verbose=TRUE))
+}
+print(filtered_out)
+
+```
+
+
+## Post filtering error plotting
+
+sanity check to see the effects of the filter and trim step
+
+```{r Post filter plot, eval = TRUE, cache= TRUE}
+runs <- dir("data/", pattern="run3")
+
+##Post filtering plotting
+for (i in seq(along=runs)){
+ path <- paste0("data/",runs[i],"/demux/trimmed/" )# CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+  filtpath <- file.path(path, "filtered") # Filtered forward files go into the path/filtered/ subdirectory
+  
+  filtFs <- sort(list.files(filtpath, pattern="R1_001.*", full.names = TRUE))
+  filtRs <- sort(list.files(filtpath, pattern="R2_001.*", full.names = TRUE))
+  p1 <- plotQualityProfile(filtFs[1:20]) + ggtitle(paste0(runs[i]," Filtered Forward Reads"))
+  p2 <- plotQualityProfile(filtRs[1:20]) + ggtitle(paste0(runs[i]," Filtered Reverse Reads"))
+  print(p1+p2)
+}
+
+```
+
+
+## Infer sequence variants
+
+Every amplicon dataset has a different set of error rates and the DADA2 algorithm makes use of a parametric error model (err) to model this and infer real biological sequence variation from error. Following error model learning, all identical sequencing reads are dereplicated into into “Exact sequence variants” with a corresponding abundance equal to the number of reads with that unique sequence. The forward and reverse reads are then merged together by aligning the denoised forward reads with the reverse-complement of the corresponding reverse reads, and then constructing the merged “contig” sequences. Following this step, a sequence variant table is constructed and saved as an RDS file.
+
+For this analysis we will use all the reads to estimate error rate, and plot the error model for each run as a sanity check
+
+Is it worth playing with to increase sensitivity for target pests here?
+https://benjjneb.github.io/dada2/pseudo.html#Pseudo-pooling
+
+The purpose of priors is to increase sensitivity to a restricted set of sequences, including singleton detection, without increasing false-positives from the unrestricted set of all possible amplicon sequences that must be considered by the naive algorithm
+
+```{r Learn error rates }
+runs <- dir("data/", pattern="run3")
+set.seed(100)
+
+for (i in seq(along=runs)){
+ path <- paste0("data/",runs[i],"/demux/trimmed/" )# CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+  filtpath <- file.path(path, "filtered") # Filtered forward files go into the path/filtered/ subdirectory
+  
+  filtFs <- list.files(filtpath, pattern="R1_001.*", full.names = TRUE)
+  filtRs <- list.files(filtpath, pattern="R2_001.*", full.names = TRUE)
+  
+    # Learn error rates from samples
+  # nread tells the function how many reads to use in error learning, this can be increased for more accuracy at the expense of runtime
+  
+  errF <- learnErrors(filtFs, multithread=TRUE, randomize=TRUE)
+  errR <- learnErrors(filtRs, multithread=TRUE, randomize=TRUE)
+  
+  ##Print error plots to see how well the algorithm modelled the errors in the different runs
+  print(plotErrors(errF, nominalQ=TRUE)+ ggtitle(paste0(runs[i]," Forward Reads")))
+  print(plotErrors(errR, nominalQ=TRUE)+ ggtitle(paste0(runs[i]," Reverse Reads")))
+  
+  #Error inference and merger of reads - Using pseudo pooling for increased sensitivity
+
+  dadaFs <- dada(filtFs, err=errF, multithread=TRUE, pool="pseudo")
+  dadaRs <- dada(filtRs, err=errR, multithread=TRUE, pool="pseudo")
+ 
+  mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+  
+# Construct sequence table
+
+seqtab <- makeSequenceTable(mergers)
+
+saveRDS(seqtab, paste0(path,"/seqtab.rds")) # CHANGE ME to where you want sequence table saved
+}
+```
+
+Check for length variation by primer
+
+## Merge Runs, Remove Chimeras
+
+Now that the sequence tables are created for each run, they need to be merged into a larger table representing the entire study. Following this, chimeric sequences are identified and removed using removeBimeraDenovo, and any identical sequences with the only difference being length variation are collapsed using collapseNoMismatch.
+
+```{r merge runs and remove chimeras}
+runs <- dir("data/", pattern="run")
+stlist <- vector()
+
+for (i in seq(along=runs)){
+  path <- paste0("data/",runs[i]) # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
+  seqs <- list.files(path, pattern="seqtab.rds", full.names = TRUE)
+  
+  assign(paste("st", i, sep = ""),readRDS(seqs))
+  stlist <- append(stlist, paste("st", i, sep = ""), after=length(seqs))
+}
+
+st.all <- mergeSequenceTables(st1, st2, st3)
+
+#Collapse all sequences together when the only difference between them is length variation - This is unnecessary for single PCR markers, however as we are using 2 pcr amplicons with slightly different lengths this will simplify analysis
+#st.all <- st1
+
+st.all <- collapseNoMismatch(st.all, minOverlap = 20, orderBy = "abundance",
+                                   vec = TRUE, verbose = TRUE)
+
+#Remove chimeras
+seqtab.nochim <- removeBimeraDenovo(st.all, method="consensus", multithread=FALSE, verbose=TRUE)
+
+#Check output of chimera removal
+print(paste(sum(seqtab.nochim)/sum(st.all),"of the abundance remaining after chimera removal"))
+
+#Check complexity
+
+hist(seqComplexity(seqtab.nochim), 100)
+
+#Remove sequences of wrong size
+#seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 250:256])
+
+
+#Fix names -removing read name, sample number etcc
+rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
+  str_replace_all(pattern="\\.rep",replacement="_Rep") %>% 
+  str_split_fixed("_",n=Inf) %>%
+  as_tibble() %>%
+  mutate(V5 = V5 %>% str_split_fixed("\\.",n=2) %>% as_tibble() %>% pull(V1))%>%
+  unite(V1,c(V1,V5),sep="_") %>%
+  pull(V1) %>%
+  str_replace(pattern="_$",replacement="") # Drop trailing underscore
+
+dir.create("output/rds/")
+saveRDS(seqtab.nochim, "output/rds/seqtab_final_Run3.rds") # CHANGE ME to where you want sequence table saved
+
+```
+
+## Assign taxonomy with IDTAXA & Exact matching
+
+We will use the IDTAXA algorithm of Murali et al 2018 - https://doi.org/10.1186/s40168-018-0521-5
+
+This requires training on a curated reference database - The pre-trained file can be found in the reference folder, alternatively see the taxreturn scripts to curate a reference database and train a new classifier.
+
+Folllowing assignment with IDTAXA, we will also use exact matching with a reference database to assign more sequences (including the synthetic positive controls) to species level
+
+```{r IDTAXA}
+#Run1
+#seqtab.nochim <- readRDS("output/rds/seqtab_final_Run1.rds")
+#Run2
+seqtab.nochim <- readRDS("output/rds/seqtab_final_Run2.rds")
+#Run3
+#seqtab.nochim <- readRDS("output/rds/seqtab_final_Run3.rds")
+
+trainingSet <- readRDS("reference/merged_arthropoda_idtaxa.rds")
+dna <- DNAStringSet(getSequences(seqtab.nochim)) # Create a DNAStringSet from the ASVs
+
+##Decide on threshold
+ids <- IdTaxa(dna, trainingSet, processors=1,threshold = 60, verbose=TRUE)  #WARNING - assigning more than one processor currently crashes R
+
+#test <- ids
+plot(ids, trainingSet)
+
+#ids <- test
+
+#delete existing file
+cat("",file="idtaxa.csv")
+for (i in 1:length(ids)){
+ lines <- as.data.frame(t(cbind(ids[[i]]$taxon,ids[[i]]$confidence)))
+ rownames(lines) <- c("taxa","confidence")
+write.table(lines,file="idtaxa.csv",sep=",",append=TRUE, col.names=FALSE)
+}
+
+ranks <-  c("Kingdom", "Phylum","Class", "Order", "Family", "Genus","Species") # ranks of interest
+#Convert the output object of class "Taxa" to a matrix analogous to the output from assignTaxonomy
+tax <- t(sapply(ids, function(x) {
+        taxa <- x$taxon
+        taxa[startsWith(taxa, "unclassified_")] <- NA
+        taxa
+}))
+
+library(stringi)
+tax <- stri_list2matrix(lapply(tax, unlist), byrow=TRUE, fill=NA)
+
+#Add sequences and column names to matrix
+colnames(tax) <- ranks; rownames(tax) <- getSequences(seqtab.nochim)
+
+#Subset to remove the root rank
+tax <- subset(tax, select=c("Kingdom", "Phylum","Class", "Order", "Family", "Genus","Species"))
+
+#Propagate high order ranks to unassigned ASV's
+tax <- propagate_tax(tax,from="Phylum") 
+
+
+#Check Output
+taxa.print <- tax # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+
+# Write taxonomy table to disk
+saveRDS(tax, "output/rds/tax_IdTaxa_run2.rds") 
+tax <- readRDS("output/rds/tax_IdTaxa_run1.rds") 
+
+#Add missed species using exact matching
+
+#
+#exact <- assignSpecies(seqtab.nochim, "reference/merged_rdp_species_synsadded.fa.gz", allowMultiple = TRUE, tryRC = TRUE,
+#  n = 100, verbose = FALSE)
+#
+#exact <- exact %>% 
+#  as.tibble() %>%
+#  mutate(binomial =  case_when(!is.na(Species) ~  paste0(Genus,"_",Species)))
+#
+###Assign synthetics using exact matching
+
+exact <- assignSpecies(seqtab.nochim, "reference/inhouse_syns.fa", allowMultiple = TRUE, tryRC = TRUE, verbose = FALSE)
+
+exact <- exact %>% 
+  as_tibble() %>%
+  mutate(binomial =  case_when(!is.na(Species) ~  paste0(Genus,"_",Species)))
+
+
+#merge together
+#For exact where Species is not NA, replace tax$Species where Species contains K__,P__,C__,O__,F__,G__
+pattern <- c("K__","P__","C__","O__","F__","G__")
+for (row in 1:nrow(tax)){
+  if   (str_detect(tax[row,7], paste(pattern, collapse="|")) && !is.na(exact$binomial[row]) == TRUE ) {
+  tax[row,7] <- exact$binomial[row]
+  }
+}
+
+# Write taxonomy table to disk
+saveRDS(tax, "output/rds/tax_IdTaxaExact_run1.rds") 
+
+```
+
+## Make Phyloseq object
+
+Following taxonomic assignment, the sequence table and taxonomic table are merged into a single phyloseq object alongside the sample info csv.
+
+We then make a plot to evaluate the effectiveness of taxonomic assignment to each rank
+
+```{r create PS, eval = FALSE}
+seqtab.nochim <- readRDS("output/rds/seqtab_final_Run2.rds")
+tax_plus <- readRDS("output/rds/tax_IdTaxaExact_run2.rds") 
+
+#Load sample information
+## ---- samdat ----
+samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE) %>%
+  filter(!duplicated(SampleID)) %>%
+  filter(seqrun==2) %>% # change for other runs
+  set_rownames(.$SampleID) %>%
+  dplyr::select(c("SampleID","ExtractID","seqrun","replicate","feature","target_subfragment","Trap","pcr_primers","experimental_factor"))
+#Display samDF
+head(samdf)
+
+## ---- phyloseq ----
+ps <- phyloseq(tax_table(tax_plus), sample_data(samdf),
+               otu_table(seqtab.nochim, taxa_are_rows = FALSE))
+
+if(nrow(seqtab.nochim) > nrow(sample_data(ps))){warning("Warning: All samples not included in phyloseq object, check sample names match the sample metadata")}
+
+rownames(samdf)[which(!rownames(samdf) %in% rownames(sample_data(ps)))]
+
+##save phyloseq object
+#saveRDS(ps, "output/rds/ps_idtaxa.rds") 
+saveRDS(ps, "output/rds/ps_idtaxaExact.rds") 
+#saveRDS(ps, "output/rds/ps_rdp.rds") 
+
+
+#Fraction of reads assigned to each taxonomic rank
+sum_reads <- speedyseq::psmelt(ps) %>%
+  gather("Rank","Name",rank_names(ps)) %>%
+  group_by(Rank) %>% 
+  mutate(Name = replace(Name, str_detect(Name, "__"),NA)) %>% # This line turns the "__" we added to lower ranks back to NA's
+  summarize(Reads_classified = sum(Abundance * !is.na(Name))) %>%
+  mutate(Frac_reads = Reads_classified / sum(sample_sums(ps))) %>%
+  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  arrange(Rank)
+
+#Fraction of ASV's assigned to each taxonomic rank
+sum_otu <- tax_table(ps) %>%
+  as("matrix") %>%
+  as_tibble(rownames="OTU") %>%
+  gather("Rank","Name",rank_names(ps)) %>%
+  group_by(Rank) %>%
+  mutate(Name = replace(Name, str_detect(Name, "__"),NA)) %>% # This line turns the "__" we added to lower ranks back to NA's
+  summarize(OTUs_classified = sum(!is.na(Name))) %>%
+  mutate(Frac_OTUs = OTUs_classified / ntaxa(ps)) %>%
+  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  arrange(Rank)
+
+#Plot Assignment to each rank
+library(data.table)
+assign_ranks <- fast_melt(ps) %>% 
+  select(c("taxaID","Kingdom","Phylum","Class","Order","Family","Genus","Species")) %>%
+  distinct()%>%
+  gather(key="Rank", value="Taxon", -taxaID) %>%
+  drop_na()
+
+gg.ranks <- ggplot(data=assign_ranks, aes(x=Rank, fill=Rank)) + 
+        geom_bar(position="dodge") +
+  scale_fill_brewer(palette="Spectral") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0)) +
+  scale_x_discrete(limits=c("Root","Phylum","Class","Order","Family","Genus","Species"))+
+  ggtitle("ASVs sucessfully assigned using IDTAXA + Exact matching")+
+  ylab("Number of ASVs")+
+  xlab("Taxonomic rank")
+  
+#Output tables of results
+
+dir.create("output/csv")
+dir.create("output/csv/unfiltered/")
+
+##Export raw csv
+export <- psmelt(ps)
+write.csv(export, file = "output/csv/rawdata.csv")
+
+#Summary export
+sp_summary <- summarize_taxa(ps, "Species", "SampleID")
+sp_summary <- spread(sp_summary, key="SampleID", value="totalRA")
+write.csv(sp_summary, file = "output/csv/unfiltered/spp_sum.csv")
+
+gen_summary <- summarize_taxa(ps, "Genus", "SampleID")
+gen_summary <- spread(gen_summary, key="SampleID", value="totalRA")
+write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
+
+##Output fasta of all ASV's - Name each one by abundance + Taxonomic assignment
+
+
+```
+
+
+
+## Process replicates 
+
+In this section we will estimate within sample consistency using Kulczynski distance, which is a presence/absense distance measure.
+
+To ensure the reproducibility of detection, all PCR replicates that had a high Kulczynski distance to other replicates within the same sample were removed.
+
+Following this, we only retained ASV's that were present in at least 2 different replicates from each sample
+
+Adapted from Mike mclarens code: https://github.com/benjjneb/dada2/issues/745
+
+This could probably go before taxonomic assignment?
+
+```{r replicates}
+#ps <- readRDS("output/rds/ps_idtaxaExact.rds")
+
+#Handle replicataes
+rm_samples <- c("Undetermined")
+ps1 <- subset_samples(ps, sample_names(ps) !=rm_samples) # Drop Undetermined reads
+ps1 <- prune_samples(sample_sums(ps1)>=20, ps1) # Drop empty samples
+
+#Calculate kulczynski distance - A presence absense measure of detection 
+
+  kdi <- phyloseq::distance(ps1, method="kulczynski")
+  
+  kdimap <- as.data.frame(as.matrix(kdi)) %>%
+    rownames_to_column() %>%
+    gather(key="colname",value="Distance",-rowname)
+  
+  #Make heatmap plot
+  gg.kdimap <- ggplot(data = kdimap, aes(x=rowname, y=colname, fill=-Distance)) + 
+    geom_tile() + scale_fill_viridis() + 
+    ggtitle(paste0("kulczynski distance")) + 
+    theme(axis.text.x=element_text(angle=90,hjust=1),
+          axis.title = element_blank(),
+          legend.position = "none")
+
+# Merge replicates
+  ps.merged <- ps1 %>%
+    merge_samples(group = "ExtractID")
+
+# keeping only those ASVs that occur in 2 replicates
+# Create a matrix of 0s and 1s indicating whether the taxon count should be
+# allowed, or should be set to 0.
+ps.merged.ok <- ps1 %>%
+    transform_sample_counts(function (x) (x > 0) * 1) %>%  #Summarise presence/absense across reps
+    merge_samples(group = "ExtractID") %>% #Merge reps
+    transform_sample_counts(function (x) (x > 1) * 1) #Only keep those occuring in 2 or more replicates
+
+##Test export
+##    write.csv(psmelt(ps.merged.ok),"test.csv")
+#    
+## Multiply the counts by the 0-1 matrix
+newotu <- otu_table(ps.merged) * otu_table(ps.merged.ok)
+
+otu_table(ps.merged) <- otu_table(newotu, taxa_are_rows = FALSE)
+
+
+#This loses the sample metadata - Need to add it agian
+samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE) %>%
+  filter(!duplicated(ExtractID)) %>%
+  set_rownames(.$ExtractID) %>%
+  dplyr::select(c("ExtractID","seqrun","feature","target_subfragment","pcr_primers","experimental_factor","Trap"))
+
+sample_data(ps.merged) <- samdf
+ps.merged <- filter_taxa(ps.merged, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
+
+
+# After merging kulczynski distance 
+
+  kdi2 <- phyloseq::distance(ps.merged, method="kulczynski")
+  
+  kdimap2 <- as.data.frame(as.matrix(kdi2)) %>%
+    rownames_to_column() %>%
+    gather(key="colname",value="Distance",-rowname)
+  
+  #Make heatmap plot
+  gg.kdimap2 <- ggplot(data = kdimap2, aes(x=rowname, y=colname, fill=-Distance)) + 
+    geom_tile() + scale_fill_viridis() + 
+    ggtitle(paste0("kulczynski distance post replicate merge")) + 
+    theme(axis.text.x=element_text(angle=90,hjust=1)) + 
+    theme(axis.text.x=element_text(angle=90,hjust=1),
+          axis.title = element_blank(),
+          legend.position = "none")
+
+```
+
+## Process synthetic mock positive control
+
+Somehow losing spikeins here
+```{r}
+#Process positive controls
+Syn_taxa <- c("Synthetic_Acrididae", "Synthetic_Aphididae", "Synthetic_Apidae", "Synthetic_Cerambycidae", "Synthetic_Crambidae", "Synthetic_Culicidae","Synthetic_Drosophilidae","Synthetic_Nitidulidae","Synthetic_Siricidae","Synthetic_Tephritidae", "Synthetic_Thripidae", "Synthetic_Tortricidae", "Synthetic_Triozidae", "Carpophilus_Synthetic1", "Carpophilus_Synthetic2", "Carpophilus_Synthetic3", "Carpophilus_Synthetic4", "Carpophilus_Synthetic5", "Carpophilus_Synthetic6","Drosophila_Synthetic1", "Drosophila_Synthetic2", "Drosophila_Synthetic3", "Drosophila_Synthetic4", "Drosophila_Synthetic5", "Drosophila_Synthetic6")
+#Estimate switching from positive controls
+pos_switchrate <- psmelt(subset_taxa(ps.merged, Species %in% Syn_taxa)) %>%
+  group_by(feature) %>%
+  summarise(Abundance = sum(Abundance))
+
+##Plot synthetics
+ps_syn <- subset_samples(ps.merged, feature=="Synthetic")
+ps_syn <- subset_taxa(ps_syn,  Species %in% Syn_taxa)
+
+ps_syn <- filter_taxa(ps_syn, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
+ps_syn_prop <- transform_sample_counts(ps_syn, fun = proportions,na_rm=TRUE) # Breaking agglomeration
+
+#Colour scheme
+library(RColorBrewer)
+col <- colorRampPalette(brewer.pal(11, "Spectral"))(20)
+
+gg.syn <- plot_bar(ps_syn, fill="Species") +
+  facet_grid(~target_subfragment,scales="free") + 
+  scale_fill_manual(values=col) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90),
+        legend.position = "none")
+
+gg.propsyn <- plot_bar(ps_syn_prop, fill="Species") +
+  facet_grid(~target_subfragment,scales="free") + 
+  scale_fill_manual(values=col)+
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+gg.syn + gg.propsyn
+```
+
+
+## Analyse spike ins for run 3
+```{r analyse spike ins}
+library(plotly)
+library(patchwork)
+
+#Remove blanks
+rm_samples <- sample_names(ps.merged)[which(str_detect(sample_names(ps.merged),"BLANK"))]
+ps1 <- subset_samples(ps.merged, !sample_names(ps.merged) %in% rm_samples) # Drop Undetermined reads
+ps1 <- prune_samples(sample_sums(ps1)>=20, ps1) # Drop empty samples
+
+#Replace experimental factor column with spikeins name to allow faceting by
+spikeins <- c("DL1","DL2","DL3","DL4","DL5","DL6","CL1","CL2","CL3","CL4","CL5","CL6")
+
+sample_data(ps1)$experimental_factor <- as.character(sample_data(ps1)$experimental_factor)
+
+for (i in 1:length(spikeins)){
+  sample_data(ps1)$experimental_factor[which(str_detect(sample_data(ps1)$ExtractID,spikeins[i]))] <- spikeins[i]
+}
+
+#Add dataset column
+sample_data(ps1) <- data.frame(sample_data(ps1)) %>%
+  mutate(dataset = str_replace(experimental_factor,pattern=".$",replacement=""))%>%
+  set_rownames(.$ExtractID)
+
+psprop <- transform_sample_counts(ps1, fun = proportions,na_rm=FALSE) # Breaking agglomeration
+
+
+#only highlight syn & others
+tax.other <- data.frame(tax_table(psprop))
+for (i in 1:7){ tax.other[,i] <- as.character(tax.other[,i])}
+tax.other$Kingdom[which(str_detect(tax.other$Species,"_Synthetic"))] <- "Synthetic"
+tax.other$Kingdom[which(!str_detect(tax.other$Species,"_Synthetic"))] <- "Other"
+tax_table(psprop) <- as.matrix(tax.other)
+
+gg.bardros <- plot_bar(subset_samples(psprop,dataset=="DL"), fill="Kingdom") +facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  scale_fill_manual(values=c("#ef8a62","#67a9cf")) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+gg.barcarp <- plot_bar(subset_samples(psprop,dataset=="CL"), fill="Kingdom") +facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  scale_fill_manual(values=c("#ef8a62","#67a9cf")) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+gg.bardros / gg.barcarp
+
+#add extra column to refer to this, str_detect the spike in name ie DL1, CL1 etch
+
+#then plot that similar heatmap of detection of the spike ins
+#could we do this with a summarise taxa call then subset to synthetics only?
+
+test <- summarize_taxa(psprop, "Species", "ExtractID") %>%
+  dplyr::filter(str_detect(Species,"_Synthetic")) %>%
+  dplyr::filter(!str_detect(ExtractID,"BLANK")) %>%
+  mutate(experimental_factor="O") 
+
+spikeins <- c("DL1","DL2","DL3","DL4","DL5","DL6","CL1","CL2","CL3","CL4","CL5","CL6")
+
+for (i in 1:length(spikeins)){
+  test$experimental_factor[which(str_detect(test$ExtractID,spikeins[i]))] <- spikeins[i]
+}
+
+#add dataset column by removing last character of experimental factor
+test <- test %>%
+  mutate(dataset = str_replace(experimental_factor,pattern=".$",replacement=""))
+
+gg.spikedros <- ggplot(test %>% filter(dataset=="DL"),aes(x=ExtractID,y=Species,fill=totalRA)) + 
+  geom_tile()  +
+  scale_fill_viridis() + 
+  facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=90))
+
+gg.spikecarp <- ggplot(test %>% filter(dataset=="CL"),aes(x=ExtractID,y=Species,fill=totalRA)) + 
+  geom_tile() +
+  theme(axis.text.x = element_text(angle=90)) +
+  scale_fill_viridis() + 
+  facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=90))
+
+gg.spikedros / gg.spikecarp
+
+```
+
+
+## ASV Filtering
+
+* remove samples with low reads
+* Remove all OTUS with an abundance less than 0.01 (or index switch estimate)
+  -This could be better estimated with an ROC curve of false positives and false negatives in mock communities?
+* Remove OTUs that are found in less than 20% of samples- For Quantitative analysis not for detection
+
+
+## Comparison between primers for bias
+
+As part of the mock community analysis, we wish to determine taxonomic bias by looking at observed vs expected reads. To do this, we load dummy sequence, taxonomy, and sample data tables and create a seperate phyloseq object, which will later be merged
+
+This loads a dummy sequence table, taxonomy table, and sample data table and merges it into the existing phyloseq object
+
+Conducted as per: https://mikemc.github.io/metacal/articles/tutorial.html
+
+
+The clr-transformed values are scale-invariant; that is the same ratio is expected to be obtained in a sample with few read counts or an identical sample with many read counts, only the precision of the clr estimate is affected. 
+
+The G(x) cannot be determined for sparse data without deleting, replacing or estimating the 0 count values. Fortunately, there are acceptable methods of dealing with 0 count values as both point estimates using zCompositionsR package
+
+```{r Carpophilus bias}
+
+#Agglomerate to species and subset to primers
+ps_bias <- tax_glom(ps.merged, taxrank="Species") %>% # Change to ps.merged for later runs
+        subset_samples(target_subfragment =="fwhF2-fwhR2n") %>% # Change this for other taxa
+        subset_samples(ps2, feature %in% c("Nitidulidae","Cherry"))
+
+#Rename taxa
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
+
+sam <- psmelt(ps_bias) %>%
+  arrange(Abundance)%>%
+  mutate(Taxon = Species)
+
+exp <- read_csv("sample_data/Test_expected_quant.csv") %>%
+  gather(Species, Abundance, -X1) %>%
+  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
+  mutate(X1 = str_split_fixed(X1,"_Rep",n=2) %>%
+           as_tibble()%>% 
+           pull(V1)) %>%
+  distinct() %>%
+  filter(str_detect(X1,"CM")) %>% ###CHANGE TO CM for carpophilus D100M for DROS
+  drop_na() %>%
+  set_colnames(c("Sample","Taxon","Actual"))
+
+#Join tables 
+joint <- sam %>%
+  filter(Taxon %in% exp$Taxon) %>%
+  #filter(Abundance > 0) %>%
+  left_join(exp, by = c("Sample","Taxon")) %>%
+  mutate(Actual = replace_na(Actual, 0)) %>%
+  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
+  mutate(Error = Observed0 / Actual)
+
+#Build error matrix
+error_mat <- build_matrix(joint, Sample, Taxon, Error)
+
+#Estimate bias
+bias <- center(error_mat, enframe = TRUE) %>%
+    dplyr::rename(Bhat = Center)
+
+#Estimate uncertainty in bias estimate
+bootreps <- bootrep_center(error_mat) %>%
+    dplyr::rename(Bhat = Center)
+
+#Plot bootstraps
+library(ggridges)
+gg.boot <- ggplot(bootreps, aes(x = Bhat-1, y = Taxon)) +
+    geom_density_ridges(scale = 4) + theme_ridges() +
+    geom_vline(xintercept = 0, color = "black") +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0)) + 
+  ggtitle("Bootstrap error estimates")
+
+#summarise bootstraps
+bootreps.summary <- bootreps %>%
+    group_by(Taxon) %>%
+    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
+bias0 <- left_join(bias, bootreps.summary, by = "Taxon")
+
+
+#Bar chart of bias for each taxa 
+
+gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
+    geom_bar(stat="identity")+
+    geom_errorbar(aes(ymin = (Gm_mean-1) - (Gm_se-1), ymax = (Gm_mean-1) + (Gm_se-1), width=0.2)) +
+    geom_point(aes(y=Gm_mean-1)) +
+    scale_fill_brewer(palette="Spectral")+
+    scale_colour_brewer(palette="Spectral") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) + 
+  ylab("Bias") +
+  #ggtitle(primers[i]) +
+  expand_limits(y = c(-2, 4)) +
+  theme(legend.position = "none")
+
+#Get pairwise bias
+bias.pw <- bias %>%
+    compute_ratios(group_vars = c()) %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":"))
+
+
+#Get pairwise boostrap estimates
+bootreps.pw <- bootreps %>%
+    compute_ratios(group_vars = ".id")
+summary.pw <- bootreps.pw %>%
+    group_by(Taxon.x, Taxon.y) %>%
+    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
+bias.pw0 <- left_join(bias.pw, summary.pw, by = c("Taxon.x", "Taxon.y"))
+
+#Plot pairwise bootstrap error estimate
+gg.pwboot <- ggplot(left_join(bias.pw %>%
+                                select(-Bhat) %>%
+                                filter(Taxon.x > Taxon.y), bootreps.pw, by = c("Taxon.x", "Taxon.y")),
+                    aes(x = Bhat-1, y = Pair)) +
+    geom_density_ridges(scale = 2) + theme_ridges() +
+    geom_vline(xintercept = 0, color = "black") +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0)) + 
+  ggtitle("Bootstrap error estimates")
+
+
+#Plot pairwise Errors
+ratios <- joint %>%
+    compute_ratios %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
+    filter(!is.nan(Error), Taxon.x < Taxon.y)
+ratios.pred <- bias.pw0 %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
+    filter(Taxon.x < Taxon.y)
+
+gg.bias <- ggplot(ratios, aes(Pair, Error, color = Sample)) +
+    geom_hline(yintercept = 1, color = "grey") +
+    geom_pointrange(data = ratios.pred, aes(y = Bhat, 
+            ymin = Bhat / Gm_se^2, ymax = Bhat * Gm_se^2), 
+        color = "black") +
+    geom_jitter(width = 0.2) +
+    scale_y_log10() +
+    coord_flip()
+
+```
+
+## Calibrating bias
+
+we estimate the bias as the compositional mean, or center, of the errors in the control samples. We do this with the center() function, which computes the center of a set of compositional vectors that are stored as a matrix. By default, center() returns a named vector,
+
+```{r calibrate bias}
+#Agglomerate to species
+library(metacal)
+
+sam <- psmelt(ps_bias) %>%
+  arrange(Abundance)%>%
+  mutate(Taxon = Species)
+
+exp <- read_csv("sample_data/Test_expected_quant.csv") %>%
+  gather(Species, Abundance, -X1) %>%
+  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
+  mutate(X1 = str_split_fixed(X1,"_Rep",n=2) %>%
+           as_tibble()%>% 
+           pull(V1)) %>%
+  distinct() %>%
+  filter(str_detect(X1,"CM")) %>% ###CHANGE TO CM for carpophilus D100M for DROS
+  drop_na() %>%
+  set_colnames(c("Sample","Taxon","Actual"))
+
+#Join tables 
+joint <- sam %>%
+  filter(Taxon %in% exp$Taxon) %>%
+  #filter(Abundance > 0) %>%
+  left_join(exp, by = c("Sample","Taxon")) %>%
+  mutate(Actual = replace_na(Actual, 0)) %>%
+  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
+  mutate(Error = Observed0 / Actual)
+
+
+#Build error matrix from just control samples
+error_mat <- build_matrix(joint, Sample, Taxon, Error) #%>% filter(Type=="Control")
+
+#Estimate bias
+bias <- center(error_mat, enframe = TRUE) %>% # Can set a denominator here - could be the spike ins
+    dplyr::rename(Bhat = Center)
+
+#Subset to only taxa in controls
+control_taxa <- unique(exp$Taxon) 
+
+
+#Calibration
+cal <- joint %>%
+    left_join(bias, by = "Taxon") %>%
+    mutate(Calibrated = Abundance / Bhat)
+
+
+#Visualise straight numbers before and after
+
+plot_df <- cal %>%
+    filter(str_detect(Sample,"CM")) %>%
+    mutate(Scale = Abundance) %>%
+    mutate(Actual = Actual*100) %>%
+    gather("Type", "Scale", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated")))
+
+gg.cal <- ggplot(plot_df, aes(Type, Scale, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral")
+
+
+#Convert to proportions by scaling by total reads - Could experiment with different scaling factors here - ie could scale with spike in or with dry weight
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+cal.prop <- cal %>%
+    filter(Taxon %in% control_taxa) %>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, Calibrated,Actual), ~ . / sum(.)) 
+
+plot_df <- cal.prop %>%
+    #filter(Sample %in% samples) %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated")))
+
+
+gg.cal <- ggplot(plot_df, aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral")
+
+#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
+
+#Plot expected vs observed
+
+correction <- cal.prop %>% 
+  select(Sample,Taxon,Actual,Abundance,Calibrated) %>%
+  gather(Type,Abundance,-Sample,-Taxon,-Actual)
+
+
+gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
+  geom_point(aes(fill=Type),size=3,alpha=0.8,shape=21,stroke=1,color="black") + 
+  geom_abline(slope=1, intercept = 0) +
+  stat_cor(aes(color=Type), label.x = 0.1)  + 
+  xlim(0,1) + 
+  ylim(0,1) + 
+  scale_fill_manual(values=c("#A9A9A9","#ae0707")) + 
+  theme_pubr() + 
+  ylab("Observed")
+
+
+gg.nocalnocal  <- ggplot((correction %>% filter(Type=="Abundance")), aes(x=Actual,y=Abundance)) +
+  geom_point(aes(fill=Type),size=3,alpha=0.8,shape=21,stroke=1,color="black") + 
+  geom_abline(slope=1, intercept = 0) +
+  stat_cor(aes(color=Type), label.x = 0.1)  + 
+  xlim(0,1) + 
+  ylim(0,1) + 
+  scale_fill_manual(values=c("#A9A9A9","#ae0707")) + 
+  theme_pubr() + 
+  ylab("Observed")
+
+```
