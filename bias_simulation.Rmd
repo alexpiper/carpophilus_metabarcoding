@@ -1,0 +1,188 @@
+---
+title: "Bias_simulation"
+author: "Alexander Piper"
+date: "03/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages}
+library(tidyverse)
+library(metacal)
+```
+
+## Multiplicative model of PCR Bias
+
+If bias is multiplicative - we can try estimate this multiplier and fit  correction factors
+```{r multiplicative}
+tb2 <- tibble(
+  Taxon = c("T1", "T2", "T3","T4"),
+  Individuals = c(1, 1, 1, 1),
+  DNA = c(1.1, 1.2, 0.6, 0.8),
+  Amplicons = c(1.6, 2.4, 1.1, 0.3),
+  Libraries = c(1.65, 2.2,0.95, 0.32),
+  Reads = c(1.45, 2.3, 1, 0.28),
+  ASVs = c(1.5, 2.5, 0.95, 0.34)
+) %>%
+  gather("Type", "Abundance",-Taxon) 
+
+gg.multi <- tb2 %>%
+  ggplot(aes(x=Type, y=Abundance, color = Taxon)) +
+  geom_hline(yintercept=1,
+             aes(group = Abundance), color = "grey") +
+  geom_path(aes(group = Taxon),size=1) +
+  geom_point(size=2) +
+  scale_y_log10(breaks = c(0.1, 0.3, 0.5, 1, 2,3),labels=c(0.1, 0.3, 0.5, 1, 2,3))+
+  scale_x_discrete(limits = c("Individuals","DNA","Amplicons","Libraries","Reads","ASVs")) +
+  scale_color_brewer(palette="Spectral") +
+  ggtitle("Multiplicative model of bias") +
+  xlab("Step in Metabarcoding workflow") +
+  ylab("Taxon abundance") + 
+  theme_bw()
+
+```
+
+
+## Problem of compositional data
+
+```{r}
+counts <- as.data.frame(t(data.frame( T1 = c(1000,1000,1000,1000),
+                                      T2 = c(800,800,800,800),
+                                      T3 = c(600,600,600,600),
+                                      T4 = c(5000,2500,1000,100) )))
+
+
+prop <- as_tibble(sapply(counts,function(x)(x / sum(x)))) %>%
+  rename_all(~ c("S1", "S2", "S3", "S4")) %>%
+  mutate(taxon=c("T1","T2","T3","T4")) %>%
+  mutate(type="Proportions")  
+
+sim <- as_tibble(counts,rownames="taxon") %>% 
+  rename_all(~ c("taxon","S1", "S2", "S3", "S4")) %>% 
+  mutate(type="Absolute counts") %>%
+  bind_rows(prop) %>%
+  gather(sample,count,-taxon,-type)
+
+ggplot(data = sim, aes(x=taxon,y=count, fill=taxon)) +
+  geom_bar(stat="identity") +
+  facet_grid(type~sample,scales = "free_y") +
+  scale_fill_brewer(palette="Spectral") + 
+  theme_bw()
+
+```
+
+
+## Taxon proportions vs taxon ratios
+
+```{r prop vs ratio}
+#devtools::install_github("mikemc/metacal")
+
+library(metacal)
+tb <- tibble(
+  Taxon = c("T1", "T2", "T3","T4"), 
+  Bias = c(1, 18, 6, 4),
+  S1 = c(1, 1, 1, 1),
+  S2 = c(1, 1/15, 4/15, 2/15),
+  S3 = c(1, 4/15, 1/15, 2/15),
+) 
+
+
+tb <- tb %>%
+  gather("Sample", "Actual", S1:S3) %>%
+  mutate(Observed = Actual * Bias) %>%
+  gather("Type", "Abundance", Actual, Observed) %>%
+  mutate_by(c(Sample, Type), Proportion = close_elts(Abundance)) %>%
+  select(Sample, Taxon, Bias, everything())
+tb
+
+#We can view the measurement error across the three samples with bar plots, as done in main text Figure 2, and also in terms of the ratios to Taxon 1:
+
+
+p.props <- ggplot(tb, aes(x = Type, y = Proportion, fill = Taxon)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Spectral") +
+  facet_wrap(~Sample) +
+  scale_y_continuous(breaks = c(0, 0.5, 1))+ 
+  theme_bw() +
+  theme(strip.text = element_text(size = 9), axis.title.x = element_blank(),
+        legend.position = "right")  
+
+p.ratios <- ggplot(tb, aes(x = Type, y = Abundance, color = Taxon)) +
+  geom_path(aes(group = Taxon),size=1) +
+  geom_point(size=2) +
+  facet_wrap(~Sample) +
+  scale_y_log10() +
+  scale_color_brewer(palette="Spectral") +
+  labs(y = "Ratio to Taxon 1")  + 
+  theme_bw() +
+  theme(strip.text = element_text(size = 9), axis.title.x = element_blank(),
+        legend.position = "right")
+
+library(patchwork)
+p.props / p.ratios
+
+#Compare actual vs observed whole communities
+
+p2.props <- ggplot(tb, aes(x = Sample, y = Proportion, fill = Taxon)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~Type) +
+  scale_y_continuous(breaks = c(0, 0.5, 1), labels = c(0, 0.5, 1)) +
+  scale_fill_brewer(palette="Spectral")+ 
+  theme_bw() +
+  theme(strip.text = element_text(size = 9))
+
+p2.ratios <- ggplot(tb, aes(x = Sample, y = Abundance, color = Taxon)) +
+  geom_path(aes(group = Taxon),size=1) +
+  geom_point(size=2) +
+  facet_wrap(~Type) +
+  scale_y_log10() +
+  scale_color_brewer(palette = "Spectral") +
+  labs(y = "Ratio to Taxon 1") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 9))
+
+p2.props / p2.ratios
+```
+
+
+
+## Compare distances between samples
+
+```{r distances}
+B <- c(1, 18, 6)
+A1 <- c(1, 1, 1)
+A2 <- c(1, 1/15, 4/15)
+A3 <- c(1, 4/15, 1/15)
+O1 <- close_elts(A1 * B)
+O2 <- close_elts(A2 * B)
+O3 <- close_elts(A3 * B)
+
+#Bray curtis similartiy
+# Actual
+xydist(A1, A2, method = "bray")
+xydist(A1, A3, method = "bray")
+xydist(A2, A3, method = "bray")
+# Observed
+xydist(O1, O2, method = "bray")
+xydist(O1, O3, method = "bray")
+xydist(O2, O3, method = "bray")
+
+#Aitchinson distance - invariant to bias
+# Actual
+xydist(A1, A2, method = "aitchison")
+xydist(A1, A3, method = "aitchison")
+xydist(A2, A3, method = "aitchison")
+# Observed
+xydist(O1, O2, method = "aitchison")
+xydist(O1, O3, method = "aitchison")
+xydist(O2, O3, method = "aitchison")
+
+```
+
+## Sessioninfo
+```{r sessioninfo}
+sessionInfo()
+```
