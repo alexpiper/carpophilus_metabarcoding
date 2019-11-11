@@ -2,7 +2,9 @@
 title: "Bias_simulation"
 author: "Alexander Piper"
 date: "03/10/2019"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -43,6 +45,8 @@ gg.multi <- tb2 %>%
   ylab("Taxon abundance") + 
   theme_bw()
 
+print(gg.multi)
+
 ```
 
 
@@ -52,7 +56,7 @@ gg.multi <- tb2 %>%
 counts <- as.data.frame(t(data.frame( T1 = c(1000,1000,1000,1000),
                                       T2 = c(800,800,800,800),
                                       T3 = c(600,600,600,600),
-                                      T4 = c(5000,2500,1000,100) )))
+                                      T4 = c(100,1000,2500,5000) )))
 
 
 prop <- as_tibble(sapply(counts,function(x)(x / sum(x)))) %>%
@@ -81,6 +85,8 @@ ggplot(data = sim, aes(x=taxon,y=count, fill=taxon)) +
 #devtools::install_github("mikemc/metacal")
 
 library(metacal)
+
+#Create new tibble - by setting T1 to 1 across all, we are looking at the ratio to it
 tb <- tibble(
   Taxon = c("T1", "T2", "T3","T4"), 
   Bias = c(1, 18, 6, 4),
@@ -110,13 +116,12 @@ p.props <- ggplot(tb, aes(x = Type, y = Proportion, fill = Taxon)) +
   theme(strip.text = element_text(size = 9), axis.title.x = element_blank(),
         legend.position = "right")  
 
-p.ratios <- ggplot(tb, aes(x = Type, y = Abundance, color = Taxon)) +
+p.ratios <- ggplot(tb, aes(x = Type, y = log2(Abundance), color = Taxon)) +
   geom_path(aes(group = Taxon),size=1) +
   geom_point(size=2) +
   facet_wrap(~Sample) +
-  scale_y_log10() +
   scale_color_brewer(palette="Spectral") +
-  labs(y = "Ratio to Taxon 1")  + 
+  labs(y = "Log2(Ratio to Taxon 1)")  + 
   theme_bw() +
   theme(strip.text = element_text(size = 9), axis.title.x = element_blank(),
         legend.position = "right")
@@ -134,11 +139,10 @@ p2.props <- ggplot(tb, aes(x = Sample, y = Proportion, fill = Taxon)) +
   theme_bw() +
   theme(strip.text = element_text(size = 9))
 
-p2.ratios <- ggplot(tb, aes(x = Sample, y = Abundance, color = Taxon)) +
+p2.ratios <- ggplot(tb, aes(x = Sample, y = log2(Abundance), color = Taxon)) +
   geom_path(aes(group = Taxon),size=1) +
   geom_point(size=2) +
   facet_wrap(~Type) +
-  scale_y_log10() +
   scale_color_brewer(palette = "Spectral") +
   labs(y = "Ratio to Taxon 1") +
   theme_bw() +
@@ -146,7 +150,6 @@ p2.ratios <- ggplot(tb, aes(x = Sample, y = Abundance, color = Taxon)) +
 
 p2.props / p2.ratios
 ```
-
 
 
 ## Compare distances between samples
