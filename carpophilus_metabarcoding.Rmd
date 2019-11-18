@@ -711,16 +711,29 @@ Following taxonomic assignment, the sequence table and taxonomic table are merge
 We then make a plot to evaluate the effectiveness of taxonomic assignment to each rank
 
 ```{r create PS, eval = FALSE}
-seqtab.nochim <- readRDS("output/rds/seqtab_final_Run2.rds")
-tax_plus <- readRDS("output/rds/tax_IdTaxaExact_run2.rds") 
+seqtab.nochim <- readRDS("output/rds/seqtab_final.rds")
+
+#Fix seqtab names -removing read name, sample number etc
+rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
+  str_split_fixed("_",n=Inf) %>%
+    as_tibble() %>% 
+  separate(V7, into="rep", sep = "\\.", extra = "drop") %>%
+  unite(col=SampleID, c("V2","rep"),sep="-") %>%
+  pull(SampleID) %>%
+  str_replace(pattern="Rep", replacement="rep")
+
+tax_plus <- readRDS("output/rds/tax_IdTaxaExact.rds") 
 
 #Load sample information
 ## ---- samdat ----
 samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE) %>%
-  filter(!duplicated(SampleID)) %>%
-  filter(seqrun==2) %>% # change for other runs
-  set_rownames(.$SampleID) %>%
-  dplyr::select(c("SampleID","ExtractID","seqrun","replicate","feature","target_subfragment","Trap","pcr_primers","experimental_factor"))
+  filter(!duplicated(sample_id)) %>%
+  filter(FCID== "HLVKYDMXX") %>% # change for other runs
+  magrittr::set_rownames(.$sample_id) %>%
+  dplyr::select(c("sample_id", "ExtractID",
+                  "geo_loc_name", "material", "treatment", "material",
+                  "target_subfragment", "F_primer", "R_primer",
+                  "FCID", "seq_platform_ID"))
 #Display samDF
 head(samdf)
 
@@ -730,14 +743,48 @@ ps <- phyloseq(tax_table(tax_plus), sample_data(samdf),
 
 if(nrow(seqtab.nochim) > nrow(sample_data(ps))){warning("Warning: All samples not included in phyloseq object, check sample names match the sample metadata")}
 
-rownames(samdf)[which(!rownames(samdf) %in% rownames(sample_data(ps)))]
+rownames(samdf)[which(!rownames(sample_data(ps))  %in% rownames(samdf))]
+
+## Subset to carpophilus
+ps <- ps %>%
+        subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae", "Synthetic", "Blank"))
+
 
 ##save phyloseq object
-#saveRDS(ps, "output/rds/ps_idtaxa.rds") 
-saveRDS(ps, "output/rds/ps_idtaxaExact.rds") 
-#saveRDS(ps, "output/rds/ps_rdp.rds") 
+saveRDS(ps, "output/rds/ps_carpophilus.rds") 
+
+dir.create("output/csv")
+dir.create("output/csv/unfiltered/")
 
 
+
+
+##Export raw csv
+export <- speedyseq::psmelt(ps) %>%
+  filter(Abundance > 0)
+write.csv(export, file = "output/csv/rawdata.csv")
+
+#Summary export
+library(data.table)
+sp_summary <- summarise_taxa(ps, "Species", "sample_id")
+sp_summary <- spread(sp_summary, key="sample_id", value="totalRA")
+write.csv(sp_summary, file = "output/csv/unfiltered/spp_sum.csv")
+
+gen_summary <- summarise_taxa(ps, "Genus", "sample_id")
+gen_summary <- spread(gen_summary, key="sample_id", value="totalRA")
+write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
+
+
+
+##Output fasta of all ASV's - Name each one by abundance + Taxonomic assignment
+
+ps_to_fasta(ps, "output/all_taxa.fasta", rank="Species")
+```
+
+
+### Summarise taxonomic assignment
+
+```{r sum taxa}
 #Fraction of reads assigned to each taxonomic rank
 sum_reads <- speedyseq::psmelt(ps) %>%
   gather("Rank","Name",rank_names(ps)) %>%
@@ -760,46 +807,11 @@ sum_otu <- tax_table(ps) %>%
   mutate(Rank = factor(Rank, rank_names(ps))) %>%
   arrange(Rank)
 
-#Plot Assignment to each rank
-library(data.table)
-assign_ranks <- fast_melt(ps) %>% 
-  select(c("taxaID","Kingdom","Phylum","Class","Order","Family","Genus","Species")) %>%
-  distinct()%>%
-  gather(key="Rank", value="Taxon", -taxaID) %>%
-  drop_na()
-
-gg.ranks <- ggplot(data=assign_ranks, aes(x=Rank, fill=Rank)) + 
-        geom_bar(position="dodge") +
-  scale_fill_brewer(palette="Spectral") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0)) +
-  scale_x_discrete(limits=c("Root","Phylum","Class","Order","Family","Genus","Species"))+
-  ggtitle("ASVs sucessfully assigned using IDTAXA + Exact matching")+
-  ylab("Number of ASVs")+
-  xlab("Taxonomic rank")
-  
-#Output tables of results
-
-dir.create("output/csv")
-dir.create("output/csv/unfiltered/")
-
-##Export raw csv
-export <- psmelt(ps)
-write.csv(export, file = "output/csv/rawdata.csv")
-
-#Summary export
-sp_summary <- summarize_taxa(ps, "Species", "SampleID")
-sp_summary <- spread(sp_summary, key="SampleID", value="totalRA")
-write.csv(sp_summary, file = "output/csv/unfiltered/spp_sum.csv")
-
-gen_summary <- summarize_taxa(ps, "Genus", "SampleID")
-gen_summary <- spread(gen_summary, key="SampleID", value="totalRA")
-write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
-
-##Output fasta of all ASV's - Name each one by abundance + Taxonomic assignment
-
-
+print(sum_reads)
+print(sum_otu)
 ```
 
+This indicates a 
 
 
 ## Process replicates 
@@ -815,12 +827,15 @@ Adapted from Mike mclarens code: https://github.com/benjjneb/dada2/issues/745
 This could probably go before taxonomic assignment?
 
 ```{r replicates}
-#ps <- readRDS("output/rds/ps_idtaxaExact.rds")
 
 #Handle replicataes
 rm_samples <- c("Undetermined")
 ps1 <- subset_samples(ps, sample_names(ps) !=rm_samples) # Drop Undetermined reads
 ps1 <- prune_samples(sample_sums(ps1)>=20, ps1) # Drop empty samples
+
+#Calculate for each primer
+#ps1 <- subset_samples(ps1,target_subfragment=="fwhF2-fwhR2n")
+#ps1 <- subset_samples(ps1,target_subfragment=="fwhF2-HexCOIR4")
 
 #Calculate kulczynski distance - A presence absense measure of detection 
 
@@ -842,28 +857,31 @@ ps1 <- prune_samples(sample_sums(ps1)>=20, ps1) # Drop empty samples
   ps.merged <- ps1 %>%
     merge_samples(group = "ExtractID")
 
-# keeping only those ASVs that occur in 2 replicates
-# Create a matrix of 0s and 1s indicating whether the taxon count should be
-# allowed, or should be set to 0.
-ps.merged.ok <- ps1 %>%
-    transform_sample_counts(function (x) (x > 0) * 1) %>%  #Summarise presence/absense across reps
-    merge_samples(group = "ExtractID") %>% #Merge reps
-    transform_sample_counts(function (x) (x > 1) * 1) #Only keep those occuring in 2 or more replicates
-
-##Test export
-##    write.csv(psmelt(ps.merged.ok),"test.csv")
-#    
-## Multiply the counts by the 0-1 matrix
-newotu <- otu_table(ps.merged) * otu_table(ps.merged.ok)
-
-otu_table(ps.merged) <- otu_table(newotu, taxa_are_rows = FALSE)
-
+## keeping only those ASVs that occur in 2 replicates
+## Create a matrix of 0s and 1s indicating whether the taxon count should be
+## allowed, or should be set to 0.
+#ps.merged.ok <- ps1 %>%
+#    transform_sample_counts(function (x) (x > 0) * 1) %>%  #Summarise presence/absense across reps
+#    merge_samples(group = "ExtractID") %>% #Merge reps
+#    transform_sample_counts(function (x) (x > 1) * 1) #Only keep those occuring in 2 or more replicates
+#
+###Test export
+###    write.csv(psmelt(ps.merged.ok),"test.csv")
+##    
+### Multiply the counts by the 0-1 matrix
+#newotu <- otu_table(ps.merged) * otu_table(ps.merged.ok)
+#
+#otu_table(ps.merged) <- otu_table(newotu, taxa_are_rows = FALSE)
+#
 
 #This loses the sample metadata - Need to add it agian
-samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE) %>%
-  filter(!duplicated(ExtractID)) %>%
-  set_rownames(.$ExtractID) %>%
-  dplyr::select(c("ExtractID","seqrun","feature","target_subfragment","pcr_primers","experimental_factor","Trap"))
+samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE)  %>%
+  filter(!duplicated(ExtractID))  %>%
+  magrittr::set_rownames(.$ExtractID) %>%
+  dplyr::select(c("sample_id", "ExtractID",
+                  "geo_loc_name", "material", "treatment",
+                  "target_subfragment", "F_primer", "R_primer",
+                  "FCID", "seq_platform_ID"))
 
 sample_data(ps.merged) <- samdf
 ps.merged <- filter_taxa(ps.merged, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
@@ -886,6 +904,19 @@ ps.merged <- filter_taxa(ps.merged, function(x) mean(x) > 0, TRUE) #Drop missing
           axis.title = element_blank(),
           legend.position = "none")
 
+  
+  
+  
+#Summary export
+library(data.table)
+sp_summary <- summarise_taxa(ps.merged, "Species", "sample_id")
+sp_summary <- spread(sp_summary, key="sample_id", value="totalRA")
+write.csv(sp_summary, file = "output/csv/unfiltered/spp_sum.csv")
+
+gen_summary <- summarise_taxa(ps.merged, "Genus", "sample_id")
+gen_summary <- spread(gen_summary, key="sample_id", value="totalRA")
+write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
+  
 ```
 
 ## Process synthetic mock positive control
@@ -896,7 +927,7 @@ Somehow losing spikeins here
 Syn_taxa <- c("Synthetic_Acrididae", "Synthetic_Aphididae", "Synthetic_Apidae", "Synthetic_Cerambycidae", "Synthetic_Crambidae", "Synthetic_Culicidae","Synthetic_Drosophilidae","Synthetic_Nitidulidae","Synthetic_Siricidae","Synthetic_Tephritidae", "Synthetic_Thripidae", "Synthetic_Tortricidae", "Synthetic_Triozidae", "Carpophilus_Synthetic1", "Carpophilus_Synthetic2", "Carpophilus_Synthetic3", "Carpophilus_Synthetic4", "Carpophilus_Synthetic5", "Carpophilus_Synthetic6","Drosophila_Synthetic1", "Drosophila_Synthetic2", "Drosophila_Synthetic3", "Drosophila_Synthetic4", "Drosophila_Synthetic5", "Drosophila_Synthetic6")
 #Estimate switching from positive controls
 pos_switchrate <- psmelt(subset_taxa(ps.merged, Species %in% Syn_taxa)) %>%
-  group_by(feature) %>%
+  group_by(geo_loc_name) %>%
   summarise(Abundance = sum(Abundance))
 
 ##Plot synthetics
@@ -908,7 +939,7 @@ ps_syn_prop <- transform_sample_counts(ps_syn, fun = proportions,na_rm=TRUE) # B
 
 #Colour scheme
 library(RColorBrewer)
-col <- colorRampPalette(brewer.pal(11, "Spectral"))(20)
+col <- colorRampPalette(brewer.pal(11, "Spectral"))(13)
 
 gg.syn <- plot_bar(ps_syn, fill="Species") +
   facet_grid(~target_subfragment,scales="free") + 
@@ -1020,6 +1051,265 @@ gg.spikedros / gg.spikecarp
   -This could be better estimated with an ROC curve of false positives and false negatives in mock communities?
 * Remove OTUs that are found in less than 20% of samples- For Quantitative analysis not for detection
 
+## Omic plotr
+
+```{r plot}
+
+#Remove anything not assigned below the root rank
+ps.filt <- ps.merged %>%
+  subset_taxa(Phylum == "Arthropoda")
+
+#New function
+library(tidyverse)
+ps_to_omicplotr <- function(physeq){
+  #taxa_names(physeq) <- seq(ntaxa(physeq))
+  
+  names <- sample_names(physeq)
+  # Start with fast melt
+  ranks <- rank_names(physeq)
+  mdt <- fast_melt(physeq) %>%
+    tidyr::unite("taxonomy", !!ranks, sep=";") 
+
+  order <- c("taxaID", names, "taxonomy")
+    # Summarize
+  summarydt <- mdt %>%
+    dplyr::group_by(SampleID, taxaID, taxonomy) %>%
+    dplyr::summarise(count=sum(count)) %>%
+    tidyr::spread(key=SampleID, value=count, fill="0") %>%
+    dplyr::select(!!order) %>%
+    dplyr::rename(`#OTU ID` = taxaID)
+  return(summarydt)
+}
+
+
+
+#output files
+omic_otu <- ps_to_omicplotr(ps.filt)
+write_tsv(omic_otu, path="omic_otu.txt")
+
+#Output metadata
+omic_data <- samdf %>%
+  rownames_to_column("#SampleID") %>%
+  filter(ExtractID %in% colnames(omic_otu)) %>%
+  select(-sample_id, -ExtractID)
+write_tsv(omic_data, path="omic_data.txt")
+
+library(omicplotR)
+omicplotr.run()
+
+```
+
+Filtering options
+```{r}
+min.count <- 100
+min.prop <- 0.1
+max.prop <- 1
+min.sum <- 1
+min.reads <- 1000
+taxselect <- 
+taxoncheck <- 
+arrowcheck <- FALSE
+scale.slider <- 0
+removenames <- FALSE
+var.filt <- 0.1
+abund <- 0
+dist <- 1
+clust <- 3
+#vals <- 
+#metaval <- 
+```
+
+# PCA
+PCA from omicplotR
+```{r}
+
+library(zCompositions)
+library(ALDEx2)
+library(omicplotR)
+
+#read file
+file <- "omic_otu.txt"
+
+data <- read.table(
+  "omic_otu.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE,
+  quote = "",
+  row.names = 1,
+  check.names = FALSE,
+  comment.char = "",
+  na.strings = "")
+
+#filter data
+x.filt <- omicplotr.filter(data, min.reads = min.reads, min.count = min.count, min.prop = min.prop, max.prop = max.prop, min.sum = min.sum)
+
+# Impute zeroes
+#data.0 <- zCompositions::cmultRepl(t(x.filt), label = 0, method = "CZM")
+
+#or pseudocount zeroes
+data.0 <- t(x.filt + 0.5)
+
+#Conduct CLR - Could try doing rowmeans of the spike ins instead?
+x.clr <- as.matrix(log(data.0) - rowMeans(log(data.0)))
+
+#Conduct variance filtering
+var.clr <- matrixStats::colVars(x.clr)
+names(var.clr) <- colnames(x.clr)
+names.hvar <- names(var.clr)[which(var.clr > var.filt)]
+x.clr.var <- x.clr[, names.hvar]
+
+#PCA
+x.pcx <- prcomp(x.clr.var)
+
+#calculate variance for x/y axis of plot
+x.var <- sum(data.pr$sdev ^ 2)
+PC1 <- paste("PC 1 Variance: %", round(sum(data.pr$sdev[1] ^ 2) / x.var * 100, 1))
+PC2 <- paste("PC 2 Variance: %", round(sum(data.pr$sdev[2] ^ 2) / x.var*100, 1))
+
+#get species (or other level)
+spp <- x.filt$taxonomy %>%
+  str_split_fixed(pattern=";", n=7) %>%
+  as.data.frame() %>%
+  pull(V7)
+
+#colour of points (features black, samples red)
+col = c("black", rgb(0, 0, 0, 0.2))
+
+#add or change options for biplot.
+biplot(
+  data.pr,
+  main = "Principal Component Analysis",
+  cex.main = 1.5,
+  cex =  c(1.0, 0.8),
+  col = col,
+  scale = scale.slider,
+  var.axes = TRUE,
+  xlab = PC1,
+  ylab = PC2,
+  xlabs = unlist(dimnames(data.pr$x)[1]),
+  ylabs = spp
+)
+
+```
+
+#RA dendogram and bars
+Dendrogram
+
+```{r RA Dendogram and bars}
+
+d <- x.filt[, seq_along(x.filt) - 1]
+taxon <- x.filt[(dim(x.filt)[2])]
+
+# sum counts by name
+d.agg <- aggregate(d, by=list(spp), FUN=sum)
+tax.agg <- d.agg$Group.1
+d.agg$Group.1 <- NULL
+
+# convert to abundances
+d.prop <- apply(d.agg, 2, function(x){x/sum(x)})
+
+#filters by abundance (slider bar)
+d.abund <- d.agg[apply(d.prop, 1, max) > abund,]
+tax.abund.u <- tax.agg[apply(d.prop, 1, max) > abund]
+
+d.abund <- t(cmultRepl(t(d.abund), label=0, method="CZM"))
+
+# get proportions of the filtered data for plotting below
+# in log-ratio speak, you are re-closing your dataset
+d.P.u <- apply(d.abund, 2, function(x){x/sum(x)})
+
+# order by OTU abundances
+new.order <- rownames(d.P.u)[order(apply(d.P.u, 1, sum), decreasing=TRUE)]
+tax.abund <- tax.abund.u[order(apply(d.P.u, 1, sum), decreasing=TRUE)]
+d.P <- d.P.u[new.order, ]
+d.clr <- apply(d.P, 2, function(x){log2(x) - mean(log2(x))})
+
+#distance matrix
+dist.d.clr <- dist(t(d.clr), method="euclidean")
+
+#Cluster
+clust.d <- hclust(dist.d.clr, method="ward.D2")
+
+#plot the dendrogram (option for wide pdfs below)
+plot(as.dendrogram(clust.d), main=NULL, cex=0.8, xlab="", xpd = TRUE)
+
+#change colours if you'd like
+colours <- c("steelblue3", "skyblue1", "indianred", "mediumpurple1",
+"olivedrab3", "pink", "#FFED6F", "mediumorchid3",
+"ivory2", "tan1", "aquamarine3", "#C0C0C0", "royalblue4",
+"mediumvioletred", "#999933", "#666699", "#CC9933", "#006666",
+"#3399FF", "#993300", "#CCCC99", "#666666", "#FFCC66",
+"#6699CC", "#663366", "#9999CC", "#CCCCCC", "#669999",
+"#CCCC66", "#CC6600", "#9999FF", "#0066CC", "#99CCCC",
+"#999999", "#FFCC00", "#009999", "#FF9900", "#999966",
+"#66CCCC", "#339966", "#CCCC33", "#EDEDED")
+
+#relative abundance barplot
+plot.new()
+
+#change sizing so barplot and legend fit
+par(fig=c(0,1,0,1), new = TRUE)
+par(fig=c(0,0.80,0, 1), new = TRUE)
+
+#stacked barplot
+barplot(d.P[,clust.d$order], names.arg = clust.d$labels, space=0, col=colours, las=2, axisnames=TRUE, border = NA, xpd = TRUE)
+
+#change location of legend
+par(fig=c(0.8,1, 0, 1), new=TRUE)
+par(xpd = TRUE)
+
+#get legend colours
+leg.col <- rev(colours[seq_len(nrow(d.P))])
+
+#add legend
+legend(x="center", legend=rev(tax.abund), col=leg.col, lwd=5, cex=0.8,
+border=NULL)
+
+```
+
+
+# ALDEX2
+
+```{r}
+#these conditions are for the selex dataset
+colnames(x.filt)
+
+library(tidyverse)
+
+conds <- vector("numeric", length=length(x.filt))
+
+conds[which(str_detect(colnames(x.filt), "CT"))] <- 0
+conds[which(str_detect(colnames(x.filt), "CM"))] <- 1
+
+x.filt <- x.filt %>% dplyr::select(-taxonomy)
+
+#use ALDEx2 to for differential abundance analysis
+#change MC or denominator if desired. More (1000-2000) MC samples is
+# recommended, but takes longer to calculate.
+d.clr <- aldex.clr(x.filt, mc.samples=128, conds = conds, denom = "all", verbose=TRUE)
+
+#effect plot
+aldex.plot(d.clr, type="MW", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "Dispersion", ylab = "Difference")
+
+title(main = "Effect Plot")
+
+#Bland-Altman plot
+aldex.plot(d.clr, type="MA", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "CLR abundance", ylab = "Difference")
+title(main = "Bland-Altman Plot")
+
+######### save both in one pdf
+# pdf("omicplotR_effect.pdf", width = 10)
+# par(mfrow=c(1,2))
+# aldex.plot(d.clr, type="MW", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "Dispersion", ylab = "Difference")
+# title(main = "Effect Plot")
+# #Bland-Altman plot
+# aldex.plot(d.clr, type="MA", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "CLR abundance", ylab = "Difference")
+# title(main = "Bland-Altman Plot")
+# dev.off()
+#########
+
+```
 
 ## Comparison between primers for bias
 
@@ -1037,14 +1327,19 @@ The G(x) cannot be determined for sparse data without deleting, replacing or est
 ```{r Carpophilus bias}
 
 #Agglomerate to species and subset to primers
-ps_bias <- tax_glom(ps.merged, taxrank="Species") %>% # Change to ps.merged for later runs
-        subset_samples(target_subfragment =="fwhF2-fwhR2n") %>% # Change this for other taxa
-        subset_samples(ps2, feature %in% c("Nitidulidae","Cherry"))
+ps_bias <- ps.merged %>% tax_glom(taxrank="Species")%>% # Change to ps.merged for later runs
+        subset_samples(geo_loc_name %in% c("Colony","Red Hill"))
 
 #Rename taxa
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
+
+
+#Agglomerate renamed taxa together
+ps_bias <- ps_bias %>%
+        tax_glom(taxrank = "Species")
+
 
 sam <- psmelt(ps_bias) %>%
   arrange(Abundance)%>%
@@ -1114,7 +1409,8 @@ gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
 
 #Get pairwise bias
 bias.pw <- bias %>%
-    compute_ratios(group_vars = c()) %>%
+  rownames_to_column("Sample") %>%
+    compute_ratios(group_vars = "Sample") %>%
     mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":"))
 
 
@@ -1163,8 +1459,19 @@ gg.bias <- ggplot(ratios, aes(Pair, Error, color = Sample)) +
 we estimate the bias as the compositional mean, or center, of the errors in the control samples. We do this with the center() function, which computes the center of a set of compositional vectors that are stored as a matrix. By default, center() returns a named vector,
 
 ```{r calibrate bias}
-#Agglomerate to species
-library(metacal)
+#Agglomerate to species and subset to primers
+ps_bias <- ps.merged %>% tax_glom(taxrank="Species") %>% # Change to ps.merged for later runs
+        subset_samples(geo_loc_name %in% c("Colony","Red Hill")) 
+
+#Rename taxa
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
+#ps_bias <- ps_bias %>% merge_taxa("Brachypeplus_Sp")
+
+#Agglomerate renamed taxa together
+ps_bias <- ps_bias %>%
+        tax_glom(taxrank = "Species")
 
 sam <- psmelt(ps_bias) %>%
   arrange(Abundance)%>%
@@ -1183,16 +1490,15 @@ exp <- read_csv("sample_data/Test_expected_quant.csv") %>%
 
 #Join tables 
 joint <- sam %>%
-  filter(Taxon %in% exp$Taxon) %>%
+  filter(Taxon %in% unique(exp$Taxon)) %>%
   #filter(Abundance > 0) %>%
   left_join(exp, by = c("Sample","Taxon")) %>%
   mutate(Actual = replace_na(Actual, 0)) %>%
   mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
   mutate(Error = Observed0 / Actual)
 
-
-#Build error matrix from just control samples
-error_mat <- build_matrix(joint, Sample, Taxon, Error) #%>% filter(Type=="Control")
+#Build error matrix
+error_mat <- build_matrix(joint, Sample, Taxon, Error)
 
 #Estimate bias
 bias <- center(error_mat, enframe = TRUE) %>% # Can set a denominator here - could be the spike ins
@@ -1249,8 +1555,8 @@ gg.cal <- ggplot(plot_df, aes(Type, Proportion, fill = Taxon)) +
 #Plot expected vs observed
 
 correction <- cal.prop %>% 
-  select(Sample,Taxon,Actual,Abundance,Calibrated) %>%
-  gather(Type,Abundance,-Sample,-Taxon,-Actual)
+  select(Sample, Taxon, Actual, Abundance, Calibrated) %>%
+  gather(Type, Abundance, -Sample, -Taxon, -Actual)
 
 
 gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
@@ -1264,7 +1570,7 @@ gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
   ylab("Observed")
 
 
-gg.nocalnocal  <- ggplot((correction %>% filter(Type=="Abundance")), aes(x=Actual,y=Abundance)) +
+gg.nocal  <- ggplot((correction %>% filter(Type=="Abundance")), aes(x=Actual,y=Abundance)) +
   geom_point(aes(fill=Type),size=3,alpha=0.8,shape=21,stroke=1,color="black") + 
   geom_abline(slope=1, intercept = 0) +
   stat_cor(aes(color=Type), label.x = 0.1)  + 
@@ -1275,3 +1581,75 @@ gg.nocalnocal  <- ggplot((correction %>% filter(Type=="Abundance")), aes(x=Actua
   ylab("Observed")
 
 ```
+
+
+## Statistical tests in with Aldex2
+
+```{r}
+library(ALDEx2)
+
+count <- 1
+aldex.in <- data.frame(d.r[which(apply(d.r, 1, function(x){mean(x)}) > count),], 
+    check.names=F)
+
+# Make a list of the number of ak samples and the number of op samples
+# NOTE: This only works if all your samples are ordered with one group 
+# first and the other group following
+# If your table is not set up this way, you will have to order the columns
+
+ak<-rep("ak", length(grep("ak", colnames(aldex.in))))
+op<-rep("op", length(grep("op", colnames(aldex.in))))
+
+#Combine into one vector
+conds<-c(ak,op)
+
+## CHECK this vector in your console by typing: conds
+#    This should match the order and number of columns you have: colnames(aldex.in)
+
+# Shortform way to do this:
+#conds<-c(rep("ak", length(grep("ak", colnames(aldex.in)))), rep("op", length(grep("op", colnames(aldex.in)))))
+
+# This is the main ALDEx function for all downstream analyses
+# This is the number of Monte-Carlo samples from the Dirichlet distribution
+# mc.samples=128 is often sufficient. 
+
+x <- aldex.clr(aldex.in, conds, mc.samples=128, verbose=TRUE)
+
+#Perform t-test
+# Both Welches and Wilcoxon rank-sum t-test, plus a Benjamini-Hochberg multiple test correction
+x.tt <- aldex.ttest(x, conds, paired.test=FALSE)
+
+# Calculate effect size (standardized mean difference)
+x.effect <- aldex.effect(x, conds, include.sample.summary=FALSE, verbose=TRUE)
+
+#COmbine results
+x.all <- data.frame(x.tt, x.effect, stringsAsFactors=FALSE)
+
+#Effect plot
+aldex.plot(x.all, type="MA", test="welch")
+
+aldex.plot(x.all, type="MW", test="welch")
+
+
+#Significant OTU's
+
+# Get the OTUs with a Benjamini-Hochberg corrected p-value less than 0.05, 
+# AND an effect size greater than 1
+# OTUs with a higher relative abundance in op will have positive effect 
+# values, OTUs higher in ak will have negative effect values
+# we can use Wilcoxon test results: wi.eBH, or raw p values (wi.ep, we.ep)
+# from either test
+sig.ak <- rownames(x.all)[which(x.all$we.eBH < 0.05 & x.all$effect < -1)]
+sig.op <- rownames(x.all)[which(x.all$we.eBH < 0.05 & x.all$effect > 1)]
+
+# What are the taxa that are significantly different?
+# Using the OTU names, we can get the taxonomy from our taxon table
+taxon[sig.ak,]
+
+# We can also look at the ALDEx output for the significant OTUs
+x.all[sig.ak,]
+
+```
+
+
+
