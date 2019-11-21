@@ -3,6 +3,8 @@ title: "carpophilus_metabarcoding"
 author: "Alexander Piper"
 date: "28/08/2019"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -386,78 +388,6 @@ the maxEE should be used as the primary quality filter. TruncQ is mostly to remo
 In general pick truncLen parameters that avoid the worst parts of the quality profiles but ensure that enough sequence is kept to healthily overlap (truncLen[[1]] + truncLen[[2]] > amplicon_length+25), leave truncQ=2, and try a couple maxEE values until I get a satisfactory number of reads through the filter
 
 
-## Qual vs MaxEE plot - Can we make this with the output of Shortreads QA instead
-
-To help visualise the effects of filtering, it can be helpful to use a read quality VS maxEE plot
-
-To get the data for this plot, firstly the following code needs to be run in BASH on the primer trimmed reads:
-
-NOTE: Combine this code into the initial BBDuk Setup so we arent bouncing back and forth
-
-NOTE: Make this work in linux with fastqcr
-
-```{r fastqc}
-library(fastqcr)
-fastqc_installer() #My custom function
-
-
-runs <- dir("data/", pattern="run3")
-path <- paste0("data/",runs[i],"/test") # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
-
-fastqFs <- sort(list.files(path, pattern="R1_*", full.names = TRUE,recursive=TRUE))
-
-fastqc_local(fq.dir=path,fastqc.path = "C:/FastQC")
-
-
-qc <- qc_aggregate(qc.dir="C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding/data/run3_spikein/test/")
-qc
-
-# Inspecting QC Problems
-
-# See which modules failed in the most samples
-qc_fails(qc, "module")
-# Or, see which samples failed the most
-qc_fails(qc, "sample")
-
-
-# Building Multi QC Reports
-qc_report("C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding/data/run3_spikein/test/", result.file = "C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding/multi-qc-report" )
-
-# Building One-Sample QC Reports (+ Interpretation)
-#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-qc.file <- system.file("fastqc_results", "S1_fastqc.zip", package = "fastqcr")
-qc_report(qc.file, result.file = "one-sample-report",
-          interpret = TRUE)
-
-```
-
-Once fastQC has been run - In R Run the following to make the plot:
-
-```{r qual vs maxEE plot}
-runs <- dir("data/", pattern="run2")
-
-for (i in seq(along=runs)){
-path <- paste0("data/",runs[i],"/fastqc") # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
-
-#Grab 5 random samples to plot quality
-QualF <- sample(sort(list.files(path, pattern=".qualF.csv", full.names = TRUE)),20)
-QualR <- QualF %>% 
-  str_replace(".qualF.csv",".qualR.csv") %>%
-  str_replace("R1_001","R2_001")
-
-pdf(paste(path,"/QualPlots.pdf", sep=""),onefile=T, width=20, height=20)
-for (q in seq(along=QualF)){
-  fastq.r1 <- read.csv(file=QualF[q], sep = "\t", header = TRUE)
-  fastq.r2 <- read.csv(file=QualR[q], sep = "\t", header = TRUE)
-
-  p1 <- qualMaxEEplot(fastq.r1 = fastq.r1, fastq.r2 = fastq.r2,name1= QualF[q], name2=QualR[q])
-  print(p1)
-}
-dev.off()
-}
-
-```
-
 ```{r filter and trim}
 ##Note - for filtering stage, these parameters may not be optimal for each run or testset, use the previous plotting step to inform this
 runs <- dir("data/", pattern="run3")
@@ -547,7 +477,7 @@ for (i in seq(along=runs)){
 
 seqtab <- makeSequenceTable(mergers)
 
-saveRDS(seqtab, paste0(path,"/seqtab.rds")) # CHANGE ME to where you want sequence table saved
+write_rds(seqtab, paste0(path,"/seqtab.rds")) # CHANGE ME to where you want sequence table saved
 }
 ```
 
@@ -565,7 +495,7 @@ for (i in seq(along=runs)){
   path <- paste0("data/",runs[i]) # CHANGE ME to the directory containing your demultiplexed forward-read fastq files
   seqs <- list.files(path, pattern="seqtab.rds", full.names = TRUE)
   
-  assign(paste("st", i, sep = ""),readRDS(seqs))
+  assign(paste("st", i, sep = ""),read_rds(seqs))
   stlist <- append(stlist, paste("st", i, sep = ""), after=length(seqs))
 }
 
@@ -602,7 +532,7 @@ rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>%
   str_replace(pattern="_$",replacement="") # Drop trailing underscore
 
 dir.create("output/rds/")
-saveRDS(seqtab.nochim, "output/rds/seqtab_final_Run3.rds") # CHANGE ME to where you want sequence table saved
+write_rds(seqtab.nochim, "output/rds/seqtab_final_Run3.rds") # CHANGE ME to where you want sequence table saved
 
 ```
 
@@ -615,14 +545,10 @@ This requires training on a curated reference database - The pre-trained file ca
 Folllowing assignment with IDTAXA, we will also use exact matching with a reference database to assign more sequences (including the synthetic positive controls) to species level
 
 ```{r IDTAXA}
-#Run1
-#seqtab.nochim <- readRDS("output/rds/seqtab_final_Run1.rds")
-#Run2
-seqtab.nochim <- readRDS("output/rds/seqtab_final_Run2.rds")
-#Run3
-#seqtab.nochim <- readRDS("output/rds/seqtab_final_Run3.rds")
 
-trainingSet <- readRDS("reference/merged_arthropoda_idtaxa.rds")
+seqtab.nochim <- read_rds("output/rds/seqtab_final.rds")
+
+trainingSet <- read_rds("reference/merged_arthropoda_idtaxa.rds")
 dna <- DNAStringSet(getSequences(seqtab.nochim)) # Create a DNAStringSet from the ASVs
 
 ##Decide on threshold
@@ -668,39 +594,31 @@ rownames(taxa.print) <- NULL
 head(taxa.print)
 
 # Write taxonomy table to disk
-saveRDS(tax, "output/rds/tax_IdTaxa_run2.rds") 
-tax <- readRDS("output/rds/tax_IdTaxa_run1.rds") 
+write_rds(tax, "output/rds/tax_IdTaxa.rds") 
+tax <- read_rds("output/rds/tax_IdTaxa.rds") 
 
 #Add missed species using exact matching
 
 #
-#exact <- assignSpecies(seqtab.nochim, "reference/merged_rdp_species_synsadded.fa.gz", allowMultiple = TRUE, tryRC = TRUE,
-#  n = 100, verbose = FALSE)
-#
-#exact <- exact %>% 
-#  as.tibble() %>%
-#  mutate(binomial =  case_when(!is.na(Species) ~  paste0(Genus,"_",Species)))
-#
-###Assign synthetics using exact matching
+exact <- assignSpecies(seqtab.nochim, "reference/merged_rdp_species_synsadded.fa.gz", allowMultiple = TRUE, tryRC = TRUE, verbose = FALSE)
 
-exact <- assignSpecies(seqtab.nochim, "reference/inhouse_syns.fa", allowMultiple = TRUE, tryRC = TRUE, verbose = FALSE)
+exact <- read_rds("output/rds/exact.rds")
 
 exact <- exact %>% 
   as_tibble() %>%
   mutate(binomial =  case_when(!is.na(Species) ~  paste0(Genus,"_",Species)))
 
-
 #merge together
 #For exact where Species is not NA, replace tax$Species where Species contains K__,P__,C__,O__,F__,G__
 pattern <- c("K__","P__","C__","O__","F__","G__")
 for (row in 1:nrow(tax)){
-  if   (str_detect(tax[row,7], paste(pattern, collapse="|")) && !is.na(exact$binomial[row]) == TRUE ) {
+  if   (str_detect(tax[row,7], paste(pattern, collapse="|")) && !is.na(exact$binomial[row])) {
   tax[row,7] <- exact$binomial[row]
   }
 }
 
 # Write taxonomy table to disk
-saveRDS(tax, "output/rds/tax_IdTaxaExact_run1.rds") 
+write_rds(tax, "output/rds/tax_IdTaxaExact.rds") 
 
 ```
 
@@ -711,7 +629,7 @@ Following taxonomic assignment, the sequence table and taxonomic table are merge
 We then make a plot to evaluate the effectiveness of taxonomic assignment to each rank
 
 ```{r create PS, eval = FALSE}
-seqtab.nochim <- readRDS("output/rds/seqtab_final.rds")
+seqtab.nochim <- read_rds("output/rds/seqtab_final.rds")
 
 #Fix seqtab names -removing read name, sample number etc
 rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
@@ -722,7 +640,7 @@ rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>%
   pull(SampleID) %>%
   str_replace(pattern="Rep", replacement="rep")
 
-tax_plus <- readRDS("output/rds/tax_IdTaxaExact.rds") 
+tax_plus <- read_rds("output/rds/tax_IdTaxaExact.rds") 
 
 #Load sample information
 ## ---- samdat ----
@@ -746,18 +664,21 @@ if(nrow(seqtab.nochim) > nrow(sample_data(ps))){warning("Warning: All samples no
 rownames(samdf)[which(!rownames(sample_data(ps))  %in% rownames(samdf))]
 
 ## Subset to carpophilus
+
+#Rename synthetic orders
+tax_table(ps)[,2][which(str_detect(tax_table(ps)[,7], "Synthetic"))] <- "Arthropoda"
+
 ps <- ps %>%
-        subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae", "Synthetic", "Blank"))
+  subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae", "Blank")) %>%
+  subset_taxa(Phylum == "Arthropoda") %>%
+  filter_taxa( function(x) mean(x) > 0, TRUE)
 
 
 ##save phyloseq object
-saveRDS(ps, "output/rds/ps_carpophilus.rds") 
+write_rds(ps, "output/rds/ps_carpophilus.rds") 
 
 dir.create("output/csv")
 dir.create("output/csv/unfiltered/")
-
-
-
 
 ##Export raw csv
 export <- speedyseq::psmelt(ps) %>%
@@ -773,8 +694,6 @@ write.csv(sp_summary, file = "output/csv/unfiltered/spp_sum.csv")
 gen_summary <- summarise_taxa(ps, "Genus", "sample_id")
 gen_summary <- spread(gen_summary, key="sample_id", value="totalRA")
 write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
-
-
 
 ##Output fasta of all ASV's - Name each one by abundance + Taxonomic assignment
 
@@ -919,19 +838,712 @@ write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
   
 ```
 
+
+
+## ASV Filtering
+
+* remove samples with low reads
+* Remove all OTUS with an abundance less than 0.01 (or index switch estimate)
+  -This could be better estimated with an ROC curve of false positives and false negatives in mock communities?
+* Remove OTUs that are found in less than 20% of samples- For Quantitative analysis not for detection
+
+## Omic plotr
+
+```{r plot}
+
+#Remove anything not assigned below the root rank
+ps.filt <- ps.merged %>%
+  subset_samples(!str_detect(sample_names(ps.merged), "-s-"))
+
+taxa_names(ps.filt) <- paste0("SV", seq(ntaxa(ps.filt)),"-",tax_table(ps.filt)[,7])
+
+
+#New function
+library(tidyverse)
+ps_to_omicplotr <- function(physeq){
+  #taxa_names(physeq) <- seq(ntaxa(physeq))
+  
+  names <- sample_names(physeq)
+  # Start with fast melt
+  ranks <- rank_names(physeq)
+  mdt <- fast_melt(physeq) %>%
+    tidyr::unite("taxonomy", !!ranks, sep=";") 
+
+  order <- c("taxaID", names, "taxonomy")
+    # Summarize
+  summarydt <- mdt %>%
+    dplyr::group_by(SampleID, taxaID, taxonomy) %>%
+    dplyr::summarise(count=sum(count)) %>%
+    tidyr::spread(key=SampleID, value=count, fill="0") %>%
+    dplyr::select(!!order) %>%
+    dplyr::rename(`#OTU ID` = taxaID)
+  return(summarydt)
+}
+
+
+
+#output files
+omic_otu <- ps_to_omicplotr(ps.filt)
+write_tsv(omic_otu, path="omic_otu.txt")
+
+#Output metadata
+omic_data <- samdf %>%
+  rownames_to_column("#SampleID") %>%
+  dplyr::filter(ExtractID %in% colnames(omic_otu)) %>%
+  dplyr::select(-sample_id, -ExtractID)
+write_tsv(omic_data, path="omic_data.txt")
+
+library(omicplotR)
+#omicplotr.run()
+
+```
+
+Filtering options - Recreate function in omicplotR::omicplotr.filter() - Or can i do this in phyloseq
+```{r}
+min.count <- 100
+min.prop <- 0.1
+max.prop <- 1
+min.sum <- 1
+min.reads <- 1000
+taxselect <- 
+taxoncheck <- 
+arrowcheck <- FALSE
+scale.slider <- 0
+removenames <- FALSE
+var.filt <- 0.01
+abund <- 0
+dist <- 1
+clust <- 3
+#vals <- 
+#metaval <- 
+```
+
+# PCA
+PCA from omicplotR
+
+Could show ordination results pre and post clusteirng
+```{r}
+
+library(zCompositions)
+library(ALDEx2)
+library(omicplotR)
+
+#read file
+file <- "omic_otu.txt"
+
+data <- read.table(
+  "omic_otu.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE,
+  quote = "",
+  row.names = 1,
+  check.names = FALSE,
+  comment.char = "",
+  na.strings = "")
+
+#filter data
+x.filt <- omicplotr.filter(data, min.reads = min.reads, min.count = min.count, min.prop = min.prop, max.prop = max.prop, min.sum = min.sum)
+
+#Drop taxonomy
+
+# Impute zeroes
+data.0 <- zCompositions::cmultRepl(t(subset(x.filt, select=-c(taxonomy))), label = 0, method = "CZM")
+
+#or pseudocount zeroes
+#data.0 <- t(x.filt + 0.5)
+
+#data.0 <- t(subset(x.filt, select=-c(taxonomy)))
+#Conduct CLR - Could try doing rowmeans of the spike ins instead?
+x.clr <- as.matrix(log(data.0) - rowMeans(log(data.0)))
+
+#Conduct variance filtering
+var.clr <- matrixStats::colVars(x.clr)
+names(var.clr) <- colnames(x.clr)
+names.hvar <- names(var.clr)[which(var.clr > var.filt)]
+x.clr.var <- x.clr[, names.hvar]
+
+#PCA
+pcx <- prcomp(x.clr.var)
+
+#calculate variance for x/y axis of plot
+x.var <- sum(pcx$sdev ^ 2)
+PC1 <- paste("PC 1 Variance: %", round(sum(pcx$sdev[1] ^ 2) / x.var * 100, 1))
+PC2 <- paste("PC 2 Variance: %", round(sum(pcx$sdev[2] ^ 2) / x.var*100, 1))
+
+#get species (or other level)
+spp <- x.filt$taxonomy %>%
+  str_split_fixed(pattern=";", n=7) %>%
+  as.data.frame() %>%
+  pull(V7)
+
+#colour of points (features black, samples red)
+col = c("black", rgb(0, 0, 0, 0.2))
+
+#add or change options for biplot.
+biplot(
+  pcx,
+  main = "Principal Component Analysis",
+  cex.main = 1.5,
+  cex =  c(1.0, 0.8),
+  col = col,
+  scale = scale.slider,
+  var.axes = TRUE,
+  xlab = PC1,
+  ylab = PC2,
+  xlabs = unlist(dimnames(pcx$x)[1]),
+  ylabs = spp
+)
+
+#Make scree plot
+screeplot(pcx, type = "barplot", main="Scree plot")
+
+
+```
+
+# Figure 2 - RA dendogram and bars
+Dendrogram
+
+```{r RA Dendogram and bars}
+library(ggdendro)
+library(dendextend)
+
+
+#filter data
+x.filt <- omicplotr.filter(data, min.reads = min.reads, min.count = min.count, min.prop = min.prop, max.prop = max.prop, min.sum = min.sum)
+
+
+d <- x.filt[, seq_along(x.filt) - 1]
+taxon <- x.filt[(dim(x.filt)[2])]
+
+# sum counts by name
+d.agg <- aggregate(d, by=list(spp), FUN=sum)
+tax.agg <- d.agg$Group.1
+d.agg$Group.1 <- NULL
+
+# convert to abundances
+d.prop <- apply(d.agg, 2, function(x){x/sum(x)})
+
+#filters by abundance (slider bar)
+d.abund <- d.agg[apply(d.prop, 1, max) > abund,]
+tax.abund.u <- tax.agg[apply(d.prop, 1, max) > abund]
+
+d.abund <- t(cmultRepl(t(d.abund), label=0, method="CZM"))
+
+# get proportions of the filtered data for plotting below
+# in log-ratio speak, you are re-closing your dataset
+d.P.u <- apply(d.abund, 2, function(x){x/sum(x)})
+
+# order by OTU abundances
+new.order <- rownames(d.P.u)[order(apply(d.P.u, 1, sum), decreasing=TRUE)]
+tax.abund <- tax.abund.u[order(apply(d.P.u, 1, sum), decreasing=TRUE)]
+d.P <- d.P.u[new.order, ]
+d.clr <- apply(d.P, 2, function(x){log2(x) - mean(log2(x))})
+
+#distance matrix
+dist.d.clr <- dist(t(d.clr), method="euclidean")
+
+#Cluster
+clust.d <- hclust(dist.d.clr, method="ward.D2")
+
+#plot the dendrogram 
+dend <- as.dendrogram(clust.d)
+
+# Rectangular lines
+ddata <- dendro_data(dend, type = "rectangle")
+gg.dend <- ggplot(segment(ddata)) + 
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend))  + 
+  scale_y_reverse(expand = c(0, 0)) +
+  theme_void()+
+  scale_x_discrete(expand=c(0.001,0.001))+
+  coord_flip()
+
+ps.bar <- ps.filt %>%
+  speedyseq::tax_glom(taxrank = "Species") %>%           # agglomerate at species level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  speedyseq::psmelt() %>% 
+  mutate(Species = as.character(Species)) %>%
+  mutate(labels = Species) %>%
+  filter(Abundance > 0.01) %>%
+  #mutate(labels = case_when(
+  #  Abundance >= 0.01 ~ Species, # Change this to whatever taxrank we want
+  #  Abundance < 0.01 ~ "Other"
+  #  )) %>%
+  mutate(ExtractID = factor(ExtractID, levels=labels(dend)))
+
+
+library(RColorBrewer)
+col <- colorRampPalette(brewer.pal(11, "Spectral"))(25)
+
+gg.bar <- ggplot(ps.bar, aes(x = ExtractID, y = Abundance, fill = labels)) + 
+  geom_bar(stat = "identity", width = 0.8) +
+  theme_minimal()+
+  theme(axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "right",
+        plot.margin=unit(c(-2,-1,10,0),unit="cm")) +
+  scale_x_discrete(expand=c(0,0), position="top")+
+  scale_y_discrete(expand=c(0,0))+
+  scale_fill_manual(values=col) +
+  guides(fill=guide_legend(ncol=1)) +
+  coord_flip() 
+
+
+#plot together
+
+Fig2 <- gg.dend + gg.bar + plot_layout(ncol = 2, widths = c(1,3)) + plot_annotation(title="Beta diversity", tag_levels="A")
+
+
+```
+
+
+# Figure 3 - Differential abundance
+
+```{r}
+#these conditions are for the selex dataset
+colnames(x.filt)
+
+
+#filter data
+x.filt <- omicplotr.filter(data, min.reads = min.reads, min.count = min.count, min.prop = min.prop, max.prop = max.prop, min.sum = min.sum)
+
+
+library(tidyverse)
+x.filt <- x.filt %>% dplyr::select(-taxonomy)
+
+conds <- vector("numeric", length=length(x.filt))
+
+
+conds[which(str_detect(colnames(x.filt), "CT"))] <- 0
+conds[which(str_detect(colnames(x.filt), "CM"))] <- 1
+
+
+
+#use ALDEx2 to for differential abundance analysis
+#change MC or denominator if desired. More (1000-2000) MC samples is
+# recommended, but takes longer to calculate.
+d.clr <- aldex.clr(x.filt, mc.samples=128, conds = conds, denom = "all", verbose=TRUE)
+
+#effect plot
+aldex.plot(d.clr, type="MW", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "Dispersion", ylab = "Difference")
+
+title(main = "Effect Plot")
+
+#Bland-Altman plot
+aldex.plot(d.clr, type="MA", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "CLR abundance", ylab = "Difference")
+title(main = "Bland-Altman Plot")
+
+######### save both in one pdf
+
+
+count <- 1
+aldex.in <- data.frame(d.r[which(apply(d.r, 1, function(x){mean(x)}) > count),], 
+    check.names=F)
+
+# Make a list of the number of ak samples and the number of op samples
+# NOTE: This only works if all your samples are ordered with one group 
+# first and the other group following
+# If your table is not set up this way, you will have to order the columns
+
+ak<-rep("ak", length(grep("ak", colnames(aldex.in))))
+op<-rep("op", length(grep("op", colnames(aldex.in))))
+
+#Combine into one vector
+conds<-c(ak,op)
+
+## CHECK this vector in your console by typing: conds
+#    This should match the order and number of columns you have: colnames(aldex.in)
+
+# Shortform way to do this:
+#conds<-c(rep("ak", length(grep("ak", colnames(aldex.in)))), rep("op", length(grep("op", colnames(aldex.in)))))
+
+# This is the main ALDEx function for all downstream analyses
+# This is the number of Monte-Carlo samples from the Dirichlet distribution
+# mc.samples=128 is often sufficient. 
+
+x <- aldex.clr(aldex.in, conds, mc.samples=128, verbose=TRUE)
+
+#Perform t-test
+# Both Welches and Wilcoxon rank-sum t-test, plus a Benjamini-Hochberg multiple test correction
+x.tt <- aldex.ttest(x, conds, paired.test=FALSE)
+
+# Calculate effect size (standardized mean difference)
+x.effect <- aldex.effect(x, conds, include.sample.summary=FALSE, verbose=TRUE)
+
+#COmbine results
+x.all <- data.frame(x.tt, x.effect, stringsAsFactors=FALSE)
+
+#Effect plot
+aldex.plot(x.all, type="MA", test="welch")
+
+aldex.plot(x.all, type="MW", test="welch")
+
+
+#Significant OTU's
+
+# Get the OTUs with a Benjamini-Hochberg corrected p-value less than 0.05, 
+# AND an effect size greater than 1
+# OTUs with a higher relative abundance in op will have positive effect 
+# values, OTUs higher in ak will have negative effect values
+# we can use Wilcoxon test results: wi.eBH, or raw p values (wi.ep, we.ep)
+# from either test
+sig.ak <- rownames(x.all)[which(x.all$we.eBH < 0.05 & x.all$effect < -1)]
+sig.op <- rownames(x.all)[which(x.all$we.eBH < 0.05 & x.all$effect > 1)]
+
+# What are the taxa that are significantly different?
+# Using the OTU names, we can get the taxonomy from our taxon table
+taxon[sig.ak,]
+
+# We can also look at the ALDEx output for the significant OTUs
+x.all[sig.ak,]
+
+```
+
+## Comparison between primers for bias
+
+As part of the mock community analysis, we wish to determine taxonomic bias by looking at observed vs expected reads. To do this, we load dummy sequence, taxonomy, and sample data tables and create a seperate phyloseq object, which will later be merged
+
+This loads a dummy sequence table, taxonomy table, and sample data table and merges it into the existing phyloseq object
+
+Conducted as per: https://mikemc.github.io/metacal/articles/tutorial.html
+
+
+The clr-transformed values are scale-invariant; that is the same ratio is expected to be obtained in a sample with few read counts or an identical sample with many read counts, only the precision of the clr estimate is affected. 
+
+The G(x) cannot be determined for sparse data without deleting, replacing or estimating the 0 count values. Fortunately, there are acceptable methods of dealing with 0 count values as both point estimates using zCompositionsR package
+
+```{r Carpophilus bias}
+
+#Agglomerate to species and subset to primers
+ps_bias <- ps.filt
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
+ps_bias <- tax_glom(ps_bias, taxrank="Species")
+
+
+sam <- psmelt(ps_bias) %>%
+  arrange(Abundance)%>%
+  mutate(Taxon = Species) %>%
+  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp1", replacement = "Brachypeplus_Sp")) %>%
+  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp2", replacement = "Brachypeplus_Sp"))
+
+exp <- read_csv("sample_data/expected_quant_EDIT.csv") %>%
+  gather(Species, Abundance, -X1) %>%
+  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
+  filter(str_detect(X1,"CM")) %>%
+  drop_na() %>%
+  set_colnames(c("Sample","Taxon","Actual"))
+
+#Subset to only those taxa desired for estimation
+#controls <- c("CM1-ex1","CM2-ex1","CM3-ex1")#,,"CM4-ex1","CM5-ex1"
+#Join tables 
+joint <- sam %>%
+  filter(Taxon %in% exp$Taxon) %>%
+  #filter(material =="Carpophilus Adults") %>%
+  #mutate(Type = ifelse(Sample %in% controls, "Est", "Eval")) %>%
+  left_join(exp, by = c("Sample","Taxon")) %>%
+  mutate(Actual = replace_na(Actual, 0)) %>%
+  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
+  mutate(Error = Observed0 / Actual) %>%
+  distinct()
+
+#Build error matrix
+
+error_mat <- joint %>%
+    filter(material == "Carpophilus Adults") %>%
+    #filter(str_detect(Sample, "ex1")) %>%
+    #filter(!is.nan(Error)) %>%
+    build_matrix(Sample, Taxon, Error)
+
+### CALCULATE SE
+
+N <- 2:20
+names(N) <- N
+
+reps <- map_dfr(N, ~bootrep_center(error_mat, R = 4e3, dist = "multinomial",
+        N = ., method = "proj"),
+    .id = "N") %>%
+    dplyr::rename(Bhat = Center)
+
+reps.summary <- reps %>%
+    group_by(N, Taxon) %>%
+    summarize(gm_mean = gm_mean(Bhat), gm_se = gm_sd(Bhat))
+
+r <- range(reps.summary$gm_se)
+names(r) <- r  %>% round(2)
+
+gg.se <- ggplot(reps.summary, aes(x= as.numeric(N), y=gm_se, color = Taxon)) +
+    geom_line(aes(group = Taxon), size=1) +
+    geom_point() +
+    scale_y_continuous(limits = range(c(1, r)), ) +
+    scale_color_brewer(palette="Spectral") +
+    #scale_color_manual(values = values.color, labels = tax_labeller) +
+    #geom_rangeframe(color = "black") +
+    #theme_bw() +
+    labs(x = "Number of controls", y = "Geometric standard error", 
+        title = "Standard error vs. number of control samples", 
+        color = "Taxon")
+gg.se
+
+
+#Estimate bias - can use a denominator by sending a denominator to a vector
+bias <- center(error_mat, enframe = TRUE, method="proj") %>%
+    dplyr::rename(Bhat = Center)
+
+#Estimate uncertainty in bias estimate
+bootreps <- bootrep_center(error_mat,  method="proj") %>%
+    dplyr::rename(Bhat = Center)
+
+#Plot bootstraps
+library(ggridges)
+gg.boot <- ggplot(bootreps, aes(x = Bhat-1, y = Taxon, fill=Taxon)) +
+    geom_density_ridges(scale = 4) + theme_ridges() +
+    geom_vline(xintercept = 0, color = "black") +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0)) + 
+  ggtitle("Bootstrap error estimates") +
+  scale_fill_brewer(palette = "Spectral")
+
+#summarise bootstraps
+bootreps.summary <- bootreps %>%
+    group_by(Taxon) %>%
+    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat)) 
+bias0 <- left_join(bias, bootreps.summary, by = "Taxon") 
+
+
+#Bar chart of bias for each taxa 
+
+gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
+    geom_bar(stat="identity")+
+    geom_errorbar(aes(ymin = (Gm_mean-1) - (Gm_se-1), ymax = (Gm_mean-1) + (Gm_se-1), width=0.2)) +
+    geom_point(aes(y=Gm_mean-1)) +
+    scale_fill_brewer(palette="Spectral")+
+    scale_colour_brewer(palette="Spectral") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) + 
+  ylab("Bias") +
+  #ggtitle(primers[i]) +
+  expand_limits(y = c(-2, 4)) +
+  theme(legend.position = "none")
+
+
+```
+
+# Calibration
+
+## Mclaren model
+```{R}
+
+#Subset to only taxa in controls
+control_taxa <- unique(exp$Taxon) 
+
+#Calibration
+cal <- joint %>%
+    left_join(bias, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / Bhat) 
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+# Could assume that all other taxa have a bias of 1 and just set them to that?
+cal.prop <- cal %>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) 
+
+gg.clrcal <- cal.prop %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using model of Mclaren et al 2019")
+
+#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
+
+```
+
+## Linear model
+```{r Linear model}
+## Linear model
+main1 <- joint %>%
+  filter(material == "Carpophilus Adults") %>%
+  group_by(Sample) %>%
+  mutate_at(vars(Abundance, Actual), ~ . / sum(.))%>%
+  dplyr::select(Sample, Taxon, Abundance, Actual, material) %>% 
+  ungroup()
+
+bias.slm <- main1 %>%
+    group_by(Taxon) %>%
+    nest() %>%
+    mutate(fit = map(data, ~lm(Abundance ~ 0 + Actual, data = .)),
+           tidied = map(fit, broom::tidy)) %>%
+  #unnest(data) %>%
+  unnest(tidied) %>%
+  select(Taxon, estimate, std.error)
+
+
+plot_df <- joint %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / estimate)%>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated")))
+
+
+gg.linearcal <- joint %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / estimate)%>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using linear model")
+
+```
+
+
+# Compare models
+```{r Compare models}
+#Plot expected vs observed
+
+correction <- joint %>%
+    left_join(bias0, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / Bhat) %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(lm = Abundance / estimate) %>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, Calibrated, Actual, lm), ~ . / sum(.)) %>% 
+    ungroup() %>%
+    dplyr::select(Sample, Taxon, Actual, Calibrated, Abundance, lm) %>%
+  rename(Observed = Abundance) %>%
+  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual)  %>%
+  mutate(Type = factor(Type, levels = c("Observed", "lm", "Calibrated"))) %>%
+  filter(!is.nan(Abundance), Actual > 0) %>%
+  distinct()
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+col <- c(Observed= "#f7f7f7", lm = "#ef8a62", Calibrated = "#67a9cf")
+
+gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
+  geom_point(aes(fill=Type), size=3, alpha=0.8, shape=21, stroke=1, color="black") + 
+  geom_abline(slope=1, intercept = 0) +
+  stat_cor(aes(color=Type), label.x = 0.1)  + 
+  facet_grid(~Taxon) +
+  #xlim(0,1) + 
+  #ylim(0,1) + 
+  scale_fill_manual(values=col) + 
+  scale_colour_manual(values=col) +
+  #theme_bw() + 
+  ylab("Observed")
+
+#MSE
+pred <- cal %>%
+    mutate(`No bias` = 1) %>%
+    rename(`Estimated bias` = Bhat) %>%
+    gather("Bias_type", "Bhat", 
+        `No bias`, `Estimated bias`) %>%
+    mutate_by(c(Sample, Bias_type), Predicted = close_elts(Actual * Bhat)) %>%
+    mutate(Bias_type = factor(Bias_type, 
+            c("No bias", "Estimated bias")))
+
+
+error <- pred %>%
+    group_by(material, Bias_type) %>%
+    filter(Actual > 0) %>%
+    summarize(
+        MSE.prop = mean((Observed0 - Predicted)^2),
+        MSE.logit = mean((logit(Observed0) - logit(Predicted))^2),
+        RMSE.logit = sqrt(mean( (logit(Observed0) - logit(Predicted))^2 )),
+        )
+error
+
+## Need to display this with standard error rather than 
+```
+
+
+#Pairwise bias
+
+```{r}
+
+#Get pairwise bias
+bias.pw <- bias %>%
+  rownames_to_column("Sample") %>%
+    compute_ratios(group_vars = "Sample") %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":"))
+
+
+#Get pairwise boostrap estimates
+bootreps.pw <- bootreps %>%
+    compute_ratios(group_vars = ".id")
+summary.pw <- bootreps.pw %>%
+    group_by(Taxon.x, Taxon.y) %>%
+    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
+bias.pw0 <- left_join(bias.pw, summary.pw, by = c("Taxon.x", "Taxon.y"))
+
+#Plot pairwise bootstrap error estimate
+gg.pwboot <- ggplot(left_join(bias.pw %>%
+                                select(-Bhat) %>%
+                                filter(Taxon.x > Taxon.y), bootreps.pw, by = c("Taxon.x", "Taxon.y")),
+                    aes(x = Bhat-1, y = Pair)) +
+    geom_density_ridges(scale = 2) + theme_ridges() +
+    geom_vline(xintercept = 0, color = "black") +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0)) + 
+  ggtitle("Bootstrap error estimates")
+
+
+#Plot pairwise Errors
+ratios <- joint %>%
+    compute_ratios %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
+    filter(!is.nan(Error), Taxon.x < Taxon.y)
+ratios.pred <- bias.pw0 %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
+    filter(Taxon.x < Taxon.y)
+
+gg.bias <- ggplot(ratios, aes(Pair, Error, color = Sample)) +
+    geom_hline(yintercept = 1, color = "grey") +
+    geom_pointrange(data = ratios.pred, aes(y = Bhat, 
+            ymin = Bhat / Gm_se^2, ymax = Bhat * Gm_se^2), 
+        color = "black") +
+    geom_jitter(width = 0.2) +
+    scale_y_log10() +
+    coord_flip()
+```
+
 ## Process synthetic mock positive control
 
 Somehow losing spikeins here
 ```{r}
 #Process positive controls
-Syn_taxa <- c("Synthetic_Acrididae", "Synthetic_Aphididae", "Synthetic_Apidae", "Synthetic_Cerambycidae", "Synthetic_Crambidae", "Synthetic_Culicidae","Synthetic_Drosophilidae","Synthetic_Nitidulidae","Synthetic_Siricidae","Synthetic_Tephritidae", "Synthetic_Thripidae", "Synthetic_Tortricidae", "Synthetic_Triozidae", "Carpophilus_Synthetic1", "Carpophilus_Synthetic2", "Carpophilus_Synthetic3", "Carpophilus_Synthetic4", "Carpophilus_Synthetic5", "Carpophilus_Synthetic6","Drosophila_Synthetic1", "Drosophila_Synthetic2", "Drosophila_Synthetic3", "Drosophila_Synthetic4", "Drosophila_Synthetic5", "Drosophila_Synthetic6")
+Syn_taxa <- c("Synthetic_Acrididae", "Synthetic_Aphididae", "Synthetic_Apidae", "Synthetic_Cerambycidae", "Synthetic_Crambidae", "Synthetic_Culicidae","Synthetic_Drosophilidae","Synthetic_Nitidulidae","Synthetic_Siricidae","Synthetic_Tephritidae", "Synthetic_Thripidae", "Synthetic_Tortricidae", "Synthetic_Triozidae")
 #Estimate switching from positive controls
-pos_switchrate <- psmelt(subset_taxa(ps.merged, Species %in% Syn_taxa)) %>%
+
+
+syn_reads <- speedyseq::psmelt(ps.merged) %>%
+  filter(Species %in% Syn_taxa) %>%
   group_by(geo_loc_name) %>%
   summarise(Abundance = sum(Abundance))
 
+syn_switching <- (syn_reads %>%
+                     filter(!str_detect(geo_loc_name, "Synthetic")) %>% 
+                     pull(Abundance) %>%
+                     sum()) / 
+                  (syn_reads %>%
+                      filter(str_detect(geo_loc_name, "Synthetic")) %>%
+                    pull(Abundance)) 
+
 ##Plot synthetics
-ps_syn <- subset_samples(ps.merged, feature=="Synthetic")
+ps_syn <- subset_samples(ps.merged, geo_loc_name=="Synthetic")
 ps_syn <- subset_taxa(ps_syn,  Species %in% Syn_taxa)
 
 ps_syn <- filter_taxa(ps_syn, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
@@ -957,8 +1569,7 @@ gg.propsyn <- plot_bar(ps_syn_prop, fill="Species") +
 gg.syn + gg.propsyn
 ```
 
-
-## Analyse spike ins for run 3
+# Analyse spike ins for run 3
 ```{r analyse spike ins}
 library(plotly)
 library(patchwork)
@@ -1042,614 +1653,4 @@ gg.spikecarp <- ggplot(test %>% filter(dataset=="CL"),aes(x=ExtractID,y=Species,
 gg.spikedros / gg.spikecarp
 
 ```
-
-
-## ASV Filtering
-
-* remove samples with low reads
-* Remove all OTUS with an abundance less than 0.01 (or index switch estimate)
-  -This could be better estimated with an ROC curve of false positives and false negatives in mock communities?
-* Remove OTUs that are found in less than 20% of samples- For Quantitative analysis not for detection
-
-## Omic plotr
-
-```{r plot}
-
-#Remove anything not assigned below the root rank
-ps.filt <- ps.merged %>%
-  subset_taxa(Phylum == "Arthropoda")
-
-#New function
-library(tidyverse)
-ps_to_omicplotr <- function(physeq){
-  #taxa_names(physeq) <- seq(ntaxa(physeq))
-  
-  names <- sample_names(physeq)
-  # Start with fast melt
-  ranks <- rank_names(physeq)
-  mdt <- fast_melt(physeq) %>%
-    tidyr::unite("taxonomy", !!ranks, sep=";") 
-
-  order <- c("taxaID", names, "taxonomy")
-    # Summarize
-  summarydt <- mdt %>%
-    dplyr::group_by(SampleID, taxaID, taxonomy) %>%
-    dplyr::summarise(count=sum(count)) %>%
-    tidyr::spread(key=SampleID, value=count, fill="0") %>%
-    dplyr::select(!!order) %>%
-    dplyr::rename(`#OTU ID` = taxaID)
-  return(summarydt)
-}
-
-
-
-#output files
-omic_otu <- ps_to_omicplotr(ps.filt)
-write_tsv(omic_otu, path="omic_otu.txt")
-
-#Output metadata
-omic_data <- samdf %>%
-  rownames_to_column("#SampleID") %>%
-  filter(ExtractID %in% colnames(omic_otu)) %>%
-  select(-sample_id, -ExtractID)
-write_tsv(omic_data, path="omic_data.txt")
-
-library(omicplotR)
-omicplotr.run()
-
-```
-
-Filtering options
-```{r}
-min.count <- 100
-min.prop <- 0.1
-max.prop <- 1
-min.sum <- 1
-min.reads <- 1000
-taxselect <- 
-taxoncheck <- 
-arrowcheck <- FALSE
-scale.slider <- 0
-removenames <- FALSE
-var.filt <- 0.1
-abund <- 0
-dist <- 1
-clust <- 3
-#vals <- 
-#metaval <- 
-```
-
-# PCA
-PCA from omicplotR
-```{r}
-
-library(zCompositions)
-library(ALDEx2)
-library(omicplotR)
-
-#read file
-file <- "omic_otu.txt"
-
-data <- read.table(
-  "omic_otu.txt",
-  header = TRUE,
-  sep = "\t",
-  stringsAsFactors = FALSE,
-  quote = "",
-  row.names = 1,
-  check.names = FALSE,
-  comment.char = "",
-  na.strings = "")
-
-#filter data
-x.filt <- omicplotr.filter(data, min.reads = min.reads, min.count = min.count, min.prop = min.prop, max.prop = max.prop, min.sum = min.sum)
-
-# Impute zeroes
-#data.0 <- zCompositions::cmultRepl(t(x.filt), label = 0, method = "CZM")
-
-#or pseudocount zeroes
-data.0 <- t(x.filt + 0.5)
-
-#Conduct CLR - Could try doing rowmeans of the spike ins instead?
-x.clr <- as.matrix(log(data.0) - rowMeans(log(data.0)))
-
-#Conduct variance filtering
-var.clr <- matrixStats::colVars(x.clr)
-names(var.clr) <- colnames(x.clr)
-names.hvar <- names(var.clr)[which(var.clr > var.filt)]
-x.clr.var <- x.clr[, names.hvar]
-
-#PCA
-x.pcx <- prcomp(x.clr.var)
-
-#calculate variance for x/y axis of plot
-x.var <- sum(data.pr$sdev ^ 2)
-PC1 <- paste("PC 1 Variance: %", round(sum(data.pr$sdev[1] ^ 2) / x.var * 100, 1))
-PC2 <- paste("PC 2 Variance: %", round(sum(data.pr$sdev[2] ^ 2) / x.var*100, 1))
-
-#get species (or other level)
-spp <- x.filt$taxonomy %>%
-  str_split_fixed(pattern=";", n=7) %>%
-  as.data.frame() %>%
-  pull(V7)
-
-#colour of points (features black, samples red)
-col = c("black", rgb(0, 0, 0, 0.2))
-
-#add or change options for biplot.
-biplot(
-  data.pr,
-  main = "Principal Component Analysis",
-  cex.main = 1.5,
-  cex =  c(1.0, 0.8),
-  col = col,
-  scale = scale.slider,
-  var.axes = TRUE,
-  xlab = PC1,
-  ylab = PC2,
-  xlabs = unlist(dimnames(data.pr$x)[1]),
-  ylabs = spp
-)
-
-```
-
-#RA dendogram and bars
-Dendrogram
-
-```{r RA Dendogram and bars}
-
-d <- x.filt[, seq_along(x.filt) - 1]
-taxon <- x.filt[(dim(x.filt)[2])]
-
-# sum counts by name
-d.agg <- aggregate(d, by=list(spp), FUN=sum)
-tax.agg <- d.agg$Group.1
-d.agg$Group.1 <- NULL
-
-# convert to abundances
-d.prop <- apply(d.agg, 2, function(x){x/sum(x)})
-
-#filters by abundance (slider bar)
-d.abund <- d.agg[apply(d.prop, 1, max) > abund,]
-tax.abund.u <- tax.agg[apply(d.prop, 1, max) > abund]
-
-d.abund <- t(cmultRepl(t(d.abund), label=0, method="CZM"))
-
-# get proportions of the filtered data for plotting below
-# in log-ratio speak, you are re-closing your dataset
-d.P.u <- apply(d.abund, 2, function(x){x/sum(x)})
-
-# order by OTU abundances
-new.order <- rownames(d.P.u)[order(apply(d.P.u, 1, sum), decreasing=TRUE)]
-tax.abund <- tax.abund.u[order(apply(d.P.u, 1, sum), decreasing=TRUE)]
-d.P <- d.P.u[new.order, ]
-d.clr <- apply(d.P, 2, function(x){log2(x) - mean(log2(x))})
-
-#distance matrix
-dist.d.clr <- dist(t(d.clr), method="euclidean")
-
-#Cluster
-clust.d <- hclust(dist.d.clr, method="ward.D2")
-
-#plot the dendrogram (option for wide pdfs below)
-plot(as.dendrogram(clust.d), main=NULL, cex=0.8, xlab="", xpd = TRUE)
-
-#change colours if you'd like
-colours <- c("steelblue3", "skyblue1", "indianred", "mediumpurple1",
-"olivedrab3", "pink", "#FFED6F", "mediumorchid3",
-"ivory2", "tan1", "aquamarine3", "#C0C0C0", "royalblue4",
-"mediumvioletred", "#999933", "#666699", "#CC9933", "#006666",
-"#3399FF", "#993300", "#CCCC99", "#666666", "#FFCC66",
-"#6699CC", "#663366", "#9999CC", "#CCCCCC", "#669999",
-"#CCCC66", "#CC6600", "#9999FF", "#0066CC", "#99CCCC",
-"#999999", "#FFCC00", "#009999", "#FF9900", "#999966",
-"#66CCCC", "#339966", "#CCCC33", "#EDEDED")
-
-#relative abundance barplot
-plot.new()
-
-#change sizing so barplot and legend fit
-par(fig=c(0,1,0,1), new = TRUE)
-par(fig=c(0,0.80,0, 1), new = TRUE)
-
-#stacked barplot
-barplot(d.P[,clust.d$order], names.arg = clust.d$labels, space=0, col=colours, las=2, axisnames=TRUE, border = NA, xpd = TRUE)
-
-#change location of legend
-par(fig=c(0.8,1, 0, 1), new=TRUE)
-par(xpd = TRUE)
-
-#get legend colours
-leg.col <- rev(colours[seq_len(nrow(d.P))])
-
-#add legend
-legend(x="center", legend=rev(tax.abund), col=leg.col, lwd=5, cex=0.8,
-border=NULL)
-
-```
-
-
-# ALDEX2
-
-```{r}
-#these conditions are for the selex dataset
-colnames(x.filt)
-
-library(tidyverse)
-
-conds <- vector("numeric", length=length(x.filt))
-
-conds[which(str_detect(colnames(x.filt), "CT"))] <- 0
-conds[which(str_detect(colnames(x.filt), "CM"))] <- 1
-
-x.filt <- x.filt %>% dplyr::select(-taxonomy)
-
-#use ALDEx2 to for differential abundance analysis
-#change MC or denominator if desired. More (1000-2000) MC samples is
-# recommended, but takes longer to calculate.
-d.clr <- aldex.clr(x.filt, mc.samples=128, conds = conds, denom = "all", verbose=TRUE)
-
-#effect plot
-aldex.plot(d.clr, type="MW", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "Dispersion", ylab = "Difference")
-
-title(main = "Effect Plot")
-
-#Bland-Altman plot
-aldex.plot(d.clr, type="MA", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "CLR abundance", ylab = "Difference")
-title(main = "Bland-Altman Plot")
-
-######### save both in one pdf
-# pdf("omicplotR_effect.pdf", width = 10)
-# par(mfrow=c(1,2))
-# aldex.plot(d.clr, type="MW", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "Dispersion", ylab = "Difference")
-# title(main = "Effect Plot")
-# #Bland-Altman plot
-# aldex.plot(d.clr, type="MA", test="welch", all.cex = 1.5, rare.cex = 1.5, called.cex = 1.5, xlab = "CLR abundance", ylab = "Difference")
-# title(main = "Bland-Altman Plot")
-# dev.off()
-#########
-
-```
-
-## Comparison between primers for bias
-
-As part of the mock community analysis, we wish to determine taxonomic bias by looking at observed vs expected reads. To do this, we load dummy sequence, taxonomy, and sample data tables and create a seperate phyloseq object, which will later be merged
-
-This loads a dummy sequence table, taxonomy table, and sample data table and merges it into the existing phyloseq object
-
-Conducted as per: https://mikemc.github.io/metacal/articles/tutorial.html
-
-
-The clr-transformed values are scale-invariant; that is the same ratio is expected to be obtained in a sample with few read counts or an identical sample with many read counts, only the precision of the clr estimate is affected. 
-
-The G(x) cannot be determined for sparse data without deleting, replacing or estimating the 0 count values. Fortunately, there are acceptable methods of dealing with 0 count values as both point estimates using zCompositionsR package
-
-```{r Carpophilus bias}
-
-#Agglomerate to species and subset to primers
-ps_bias <- ps.merged %>% tax_glom(taxrank="Species")%>% # Change to ps.merged for later runs
-        subset_samples(geo_loc_name %in% c("Colony","Red Hill"))
-
-#Rename taxa
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
-
-
-#Agglomerate renamed taxa together
-ps_bias <- ps_bias %>%
-        tax_glom(taxrank = "Species")
-
-
-sam <- psmelt(ps_bias) %>%
-  arrange(Abundance)%>%
-  mutate(Taxon = Species)
-
-exp <- read_csv("sample_data/Test_expected_quant.csv") %>%
-  gather(Species, Abundance, -X1) %>%
-  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
-  mutate(X1 = str_split_fixed(X1,"_Rep",n=2) %>%
-           as_tibble()%>% 
-           pull(V1)) %>%
-  distinct() %>%
-  filter(str_detect(X1,"CM")) %>% ###CHANGE TO CM for carpophilus D100M for DROS
-  drop_na() %>%
-  set_colnames(c("Sample","Taxon","Actual"))
-
-#Join tables 
-joint <- sam %>%
-  filter(Taxon %in% exp$Taxon) %>%
-  #filter(Abundance > 0) %>%
-  left_join(exp, by = c("Sample","Taxon")) %>%
-  mutate(Actual = replace_na(Actual, 0)) %>%
-  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
-  mutate(Error = Observed0 / Actual)
-
-#Build error matrix
-error_mat <- build_matrix(joint, Sample, Taxon, Error)
-
-#Estimate bias
-bias <- center(error_mat, enframe = TRUE) %>%
-    dplyr::rename(Bhat = Center)
-
-#Estimate uncertainty in bias estimate
-bootreps <- bootrep_center(error_mat) %>%
-    dplyr::rename(Bhat = Center)
-
-#Plot bootstraps
-library(ggridges)
-gg.boot <- ggplot(bootreps, aes(x = Bhat-1, y = Taxon)) +
-    geom_density_ridges(scale = 4) + theme_ridges() +
-    geom_vline(xintercept = 0, color = "black") +
-  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
-  scale_x_continuous(expand = c(0, 0)) + 
-  ggtitle("Bootstrap error estimates")
-
-#summarise bootstraps
-bootreps.summary <- bootreps %>%
-    group_by(Taxon) %>%
-    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
-bias0 <- left_join(bias, bootreps.summary, by = "Taxon")
-
-
-#Bar chart of bias for each taxa 
-
-gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
-    geom_bar(stat="identity")+
-    geom_errorbar(aes(ymin = (Gm_mean-1) - (Gm_se-1), ymax = (Gm_mean-1) + (Gm_se-1), width=0.2)) +
-    geom_point(aes(y=Gm_mean-1)) +
-    scale_fill_brewer(palette="Spectral")+
-    scale_colour_brewer(palette="Spectral") + 
-  theme_bw() +
-  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) + 
-  ylab("Bias") +
-  #ggtitle(primers[i]) +
-  expand_limits(y = c(-2, 4)) +
-  theme(legend.position = "none")
-
-#Get pairwise bias
-bias.pw <- bias %>%
-  rownames_to_column("Sample") %>%
-    compute_ratios(group_vars = "Sample") %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":"))
-
-
-#Get pairwise boostrap estimates
-bootreps.pw <- bootreps %>%
-    compute_ratios(group_vars = ".id")
-summary.pw <- bootreps.pw %>%
-    group_by(Taxon.x, Taxon.y) %>%
-    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
-bias.pw0 <- left_join(bias.pw, summary.pw, by = c("Taxon.x", "Taxon.y"))
-
-#Plot pairwise bootstrap error estimate
-gg.pwboot <- ggplot(left_join(bias.pw %>%
-                                select(-Bhat) %>%
-                                filter(Taxon.x > Taxon.y), bootreps.pw, by = c("Taxon.x", "Taxon.y")),
-                    aes(x = Bhat-1, y = Pair)) +
-    geom_density_ridges(scale = 2) + theme_ridges() +
-    geom_vline(xintercept = 0, color = "black") +
-  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
-  scale_x_continuous(expand = c(0, 0)) + 
-  ggtitle("Bootstrap error estimates")
-
-
-#Plot pairwise Errors
-ratios <- joint %>%
-    compute_ratios %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
-    filter(!is.nan(Error), Taxon.x < Taxon.y)
-ratios.pred <- bias.pw0 %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
-    filter(Taxon.x < Taxon.y)
-
-gg.bias <- ggplot(ratios, aes(Pair, Error, color = Sample)) +
-    geom_hline(yintercept = 1, color = "grey") +
-    geom_pointrange(data = ratios.pred, aes(y = Bhat, 
-            ymin = Bhat / Gm_se^2, ymax = Bhat * Gm_se^2), 
-        color = "black") +
-    geom_jitter(width = 0.2) +
-    scale_y_log10() +
-    coord_flip()
-
-```
-
-## Calibrating bias
-
-we estimate the bias as the compositional mean, or center, of the errors in the control samples. We do this with the center() function, which computes the center of a set of compositional vectors that are stored as a matrix. By default, center() returns a named vector,
-
-```{r calibrate bias}
-#Agglomerate to species and subset to primers
-ps_bias <- ps.merged %>% tax_glom(taxrank="Species") %>% # Change to ps.merged for later runs
-        subset_samples(geo_loc_name %in% c("Colony","Red Hill")) 
-
-#Rename taxa
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
-#ps_bias <- ps_bias %>% merge_taxa("Brachypeplus_Sp")
-
-#Agglomerate renamed taxa together
-ps_bias <- ps_bias %>%
-        tax_glom(taxrank = "Species")
-
-sam <- psmelt(ps_bias) %>%
-  arrange(Abundance)%>%
-  mutate(Taxon = Species)
-
-exp <- read_csv("sample_data/Test_expected_quant.csv") %>%
-  gather(Species, Abundance, -X1) %>%
-  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
-  mutate(X1 = str_split_fixed(X1,"_Rep",n=2) %>%
-           as_tibble()%>% 
-           pull(V1)) %>%
-  distinct() %>%
-  filter(str_detect(X1,"CM")) %>% ###CHANGE TO CM for carpophilus D100M for DROS
-  drop_na() %>%
-  set_colnames(c("Sample","Taxon","Actual"))
-
-#Join tables 
-joint <- sam %>%
-  filter(Taxon %in% unique(exp$Taxon)) %>%
-  #filter(Abundance > 0) %>%
-  left_join(exp, by = c("Sample","Taxon")) %>%
-  mutate(Actual = replace_na(Actual, 0)) %>%
-  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
-  mutate(Error = Observed0 / Actual)
-
-#Build error matrix
-error_mat <- build_matrix(joint, Sample, Taxon, Error)
-
-#Estimate bias
-bias <- center(error_mat, enframe = TRUE) %>% # Can set a denominator here - could be the spike ins
-    dplyr::rename(Bhat = Center)
-
-#Subset to only taxa in controls
-control_taxa <- unique(exp$Taxon) 
-
-
-#Calibration
-cal <- joint %>%
-    left_join(bias, by = "Taxon") %>%
-    mutate(Calibrated = Abundance / Bhat)
-
-
-#Visualise straight numbers before and after
-
-plot_df <- cal %>%
-    filter(str_detect(Sample,"CM")) %>%
-    mutate(Scale = Abundance) %>%
-    mutate(Actual = Actual*100) %>%
-    gather("Type", "Scale", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated")))
-
-gg.cal <- ggplot(plot_df, aes(Type, Scale, fill = Taxon)) +
-    geom_col() +
-    facet_wrap(~Sample, drop=TRUE) +
-    theme_bw() +
-    scale_fill_brewer(palette = "Spectral")
-
-
-#Convert to proportions by scaling by total reads - Could experiment with different scaling factors here - ie could scale with spike in or with dry weight
-
-#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
-cal.prop <- cal %>%
-    filter(Taxon %in% control_taxa) %>%
-    group_by(Sample) %>%
-    mutate_at(vars(Abundance, Calibrated,Actual), ~ . / sum(.)) 
-
-plot_df <- cal.prop %>%
-    #filter(Sample %in% samples) %>%
-    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated")))
-
-
-gg.cal <- ggplot(plot_df, aes(Type, Proportion, fill = Taxon)) +
-    geom_col() +
-    facet_wrap(~Sample, drop=TRUE) +
-    theme_bw() +
-    scale_fill_brewer(palette = "Spectral")
-
-#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
-
-#Plot expected vs observed
-
-correction <- cal.prop %>% 
-  select(Sample, Taxon, Actual, Abundance, Calibrated) %>%
-  gather(Type, Abundance, -Sample, -Taxon, -Actual)
-
-
-gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
-  geom_point(aes(fill=Type),size=3,alpha=0.8,shape=21,stroke=1,color="black") + 
-  geom_abline(slope=1, intercept = 0) +
-  stat_cor(aes(color=Type), label.x = 0.1)  + 
-  xlim(0,1) + 
-  ylim(0,1) + 
-  scale_fill_manual(values=c("#A9A9A9","#ae0707")) + 
-  theme_pubr() + 
-  ylab("Observed")
-
-
-gg.nocal  <- ggplot((correction %>% filter(Type=="Abundance")), aes(x=Actual,y=Abundance)) +
-  geom_point(aes(fill=Type),size=3,alpha=0.8,shape=21,stroke=1,color="black") + 
-  geom_abline(slope=1, intercept = 0) +
-  stat_cor(aes(color=Type), label.x = 0.1)  + 
-  xlim(0,1) + 
-  ylim(0,1) + 
-  scale_fill_manual(values=c("#A9A9A9","#ae0707")) + 
-  theme_pubr() + 
-  ylab("Observed")
-
-```
-
-
-## Statistical tests in with Aldex2
-
-```{r}
-library(ALDEx2)
-
-count <- 1
-aldex.in <- data.frame(d.r[which(apply(d.r, 1, function(x){mean(x)}) > count),], 
-    check.names=F)
-
-# Make a list of the number of ak samples and the number of op samples
-# NOTE: This only works if all your samples are ordered with one group 
-# first and the other group following
-# If your table is not set up this way, you will have to order the columns
-
-ak<-rep("ak", length(grep("ak", colnames(aldex.in))))
-op<-rep("op", length(grep("op", colnames(aldex.in))))
-
-#Combine into one vector
-conds<-c(ak,op)
-
-## CHECK this vector in your console by typing: conds
-#    This should match the order and number of columns you have: colnames(aldex.in)
-
-# Shortform way to do this:
-#conds<-c(rep("ak", length(grep("ak", colnames(aldex.in)))), rep("op", length(grep("op", colnames(aldex.in)))))
-
-# This is the main ALDEx function for all downstream analyses
-# This is the number of Monte-Carlo samples from the Dirichlet distribution
-# mc.samples=128 is often sufficient. 
-
-x <- aldex.clr(aldex.in, conds, mc.samples=128, verbose=TRUE)
-
-#Perform t-test
-# Both Welches and Wilcoxon rank-sum t-test, plus a Benjamini-Hochberg multiple test correction
-x.tt <- aldex.ttest(x, conds, paired.test=FALSE)
-
-# Calculate effect size (standardized mean difference)
-x.effect <- aldex.effect(x, conds, include.sample.summary=FALSE, verbose=TRUE)
-
-#COmbine results
-x.all <- data.frame(x.tt, x.effect, stringsAsFactors=FALSE)
-
-#Effect plot
-aldex.plot(x.all, type="MA", test="welch")
-
-aldex.plot(x.all, type="MW", test="welch")
-
-
-#Significant OTU's
-
-# Get the OTUs with a Benjamini-Hochberg corrected p-value less than 0.05, 
-# AND an effect size greater than 1
-# OTUs with a higher relative abundance in op will have positive effect 
-# values, OTUs higher in ak will have negative effect values
-# we can use Wilcoxon test results: wi.eBH, or raw p values (wi.ep, we.ep)
-# from either test
-sig.ak <- rownames(x.all)[which(x.all$we.eBH < 0.05 & x.all$effect < -1)]
-sig.op <- rownames(x.all)[which(x.all$we.eBH < 0.05 & x.all$effect > 1)]
-
-# What are the taxa that are significantly different?
-# Using the OTU names, we can get the taxonomy from our taxon table
-taxon[sig.ak,]
-
-# We can also look at the ALDEx output for the significant OTUs
-x.all[sig.ak,]
-
-```
-
-
 
