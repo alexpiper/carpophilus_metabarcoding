@@ -631,14 +631,41 @@ We then make a plot to evaluate the effectiveness of taxonomic assignment to eac
 ```{r create PS, eval = FALSE}
 seqtab.nochim <- read_rds("output/rds/seqtab_final.rds")
 
-#Fix seqtab names -removing read name, sample number etc
+##Fix seqtab names -removing read name, sample number etc
+#rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
+#  str_split_fixed("_",n=Inf) %>%
+#    as_tibble() %>% 
+#  separate(V7, into="rep", sep = "\\.", extra = "drop") %>%
+#  unite(col=SampleID, c("V2","rep"),sep="-") %>%
+#  pull(SampleID) %>%
+#  str_replace(pattern="Rep", replacement="rep")
+#
+
+#Run 1 
 rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
   str_split_fixed("_",n=Inf) %>%
     as_tibble() %>% 
-  separate(V7, into="rep", sep = "\\.", extra = "drop") %>%
-  unite(col=SampleID, c("V2","rep"),sep="-") %>%
-  pull(SampleID) %>%
-  str_replace(pattern="Rep", replacement="rep")
+  pull(V1)
+
+
+### Rename problematic samples
+rownames(seqtab.nochim)  <- rownames(seqtab.nochim) %>%
+  str_replace_all("CM9", "CM8")%>%
+  str_replace_all("CM10", "CM9")%>%
+  str_replace_all("CM11", "CM10")%>%
+  str_replace_all("CML1", "CM11")%>%
+  str_replace_all("CML2", "CML1")%>%
+  str_replace_all("CML3", "CML2")%>%
+  str_replace_all("CML4", "CML3")%>%
+  str_replace_all("CML5", "CML4")%>%
+  str_replace_all("CML6", "CML5")%>%
+  str_replace_all("CT1", "CML6")%>%
+  str_replace_all("CT2", "CT1")%>%
+  #str_replace_all("CT3", "CT2")%>%
+  #str_replace_all("CT4", "CT3")%>%
+  str_replace_all("CT5", "CT11")%>% # NEED TO CHECK THIS
+  str_replace_all("CT5dup", "CT5")
+
 
 tax_plus <- read_rds("output/rds/tax_IdTaxaExact.rds") 
 
@@ -669,10 +696,12 @@ rownames(samdf)[which(!rownames(sample_data(ps))  %in% rownames(samdf))]
 tax_table(ps)[,2][which(str_detect(tax_table(ps)[,7], "Synthetic"))] <- "Arthropoda"
 
 ps <- ps %>%
-  subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae", "Blank")) %>%
+  subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae")) %>%
   subset_taxa(Phylum == "Arthropoda") %>%
-  filter_taxa( function(x) mean(x) > 0, TRUE)
+  filter_taxa( function(x) mean(x) > 0, TRUE) 
 
+#rm_samples <- "CT11|CM7"
+#ps <- subset_samples(ps, str_detect(sample_names(ps), !rm_samples)) # Drop Undetermined reads
 
 ##save phyloseq object
 write_rds(ps, "output/rds/ps_carpophilus.rds") 
@@ -823,9 +852,7 @@ ps.merged <- filter_taxa(ps.merged, function(x) mean(x) > 0, TRUE) #Drop missing
           axis.title = element_blank(),
           legend.position = "none")
 
-  
-  
-  
+
 #Summary export
 library(data.table)
 sp_summary <- summarise_taxa(ps.merged, "Species", "sample_id")
@@ -847,15 +874,307 @@ write.csv(gen_summary, file = "output/csv/unfiltered/gen_sum.csv")
   -This could be better estimated with an ROC curve of false positives and false negatives in mock communities?
 * Remove OTUs that are found in less than 20% of samples- For Quantitative analysis not for detection
 
-## Omic plotr
 
-```{r plot}
+# Bias
 
+As part of the mock community analysis, we wish to determine taxonomic bias by looking at observed vs expected reads. To do this, we load dummy sequence, taxonomy, and sample data tables and create a seperate phyloseq object, which will later be merged
+
+This loads a dummy sequence table, taxonomy table, and sample data table and merges it into the existing phyloseq object
+
+Conducted as per: https://mikemc.github.io/metacal/articles/tutorial.html
+
+
+The clr-transformed values are scale-invariant; that is the same ratio is expected to be obtained in a sample with few read counts or an identical sample with many read counts, only the precision of the clr estimate is affected. 
+
+The G(x) cannot be determined for sparse data without deleting, replacing or estimating the 0 count values. Fortunately, there are acceptable methods of dealing with 0 count values as both point estimates using zCompositionsR package
+
+```{r Carpophilus bias}
 #Remove anything not assigned below the root rank
 ps.filt <- ps.merged %>%
   subset_samples(!str_detect(sample_names(ps.merged), "-s-"))
 
 taxa_names(ps.filt) <- paste0("SV", seq(ntaxa(ps.filt)),"-",tax_table(ps.filt)[,7])
+
+#Agglomerate to species and subset to primers
+ps_bias <- ps.filt
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
+ps_bias <- tax_glom(ps_bias, taxrank="Species")
+
+
+sam <- psmelt(ps_bias) %>%
+  arrange(Abundance)%>%
+  mutate(Taxon = Species) %>%
+  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp1", replacement = "Brachypeplus_Sp")) %>%
+  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp2", replacement = "Brachypeplus_Sp"))
+
+exp <- read_csv("sample_data/expected_quant_EDIT.csv") %>%
+  gather(Species, Abundance, -X1) %>%
+  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
+  filter(str_detect(X1,"CM|CT")) %>%
+  drop_na() %>%
+  set_colnames(c("Sample","Taxon","Actual"))
+
+#Subset to only those taxa desired for estimation
+controls <- c("CM1-ex1","CM2-ex1","CM3-ex1","CM5-ex1", "CM6-ex1", "CM6-ex2","CM9-ex1","CM9-ex2")
+#controls <- c("CM6-ex1","CM6-ex2","CM7-ex1","CM7-ex2","CM9-ex1","CM9-ex2")
+#Join tables 
+joint <- sam %>%
+  #filter(material =="Carpophilus Adults") %>%
+  filter(Taxon %in% exp$Taxon) %>%
+  mutate(Type = ifelse(Sample %in% controls, "Est", "Eval")) %>%
+  left_join(exp, by = c("Sample","Taxon")) %>%
+  mutate(Actual = replace_na(Actual, 0)) %>%
+  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
+  mutate(Error = Observed0 / Actual) %>%
+  distinct()
+
+#Build error matrix
+
+error_mat <- joint %>%
+    #filter(Type=="Est") %>%
+    filter(material == "Carpophilus Adults") %>%
+    #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
+    build_matrix(Sample, Taxon, Error)
+
+### CALCULATE SE
+#
+N <- 1:20
+names(N) <- N
+
+reps <- map_dfr(N, ~bootrep_center(error_mat, R = 4e3, dist = "multinomial",
+        N = ., method = "proj"),
+    .id = "N") %>%
+    dplyr::rename(Bhat = Center)
+
+reps.summary <- reps %>%
+    group_by(N, Taxon) %>%
+    summarize(gm_mean = gm_mean(Bhat), gm_se = gm_sd(Bhat))
+
+r <- range(reps.summary$gm_se)
+names(r) <- r  %>% round(2)
+
+gg.se <- ggplot(reps.summary, aes(x= as.numeric(N), y=gm_se, color = Taxon)) +
+    geom_line(aes(group = Taxon), size=1) +
+    geom_point() +
+    scale_y_continuous(limits = range(c(1, r)), ) +
+    scale_color_brewer(palette="Spectral") +
+    #scale_color_manual(values = values.color, labels = tax_labeller) +
+    #geom_rangeframe(color = "black") +
+    #theme_bw() +
+    labs(x = "Number of controls", y = "Geometric standard error", 
+        title = "Standard error vs. number of control samples", 
+        color = "Taxon")
+gg.se
+
+
+#Estimate bias - can use a denominator by sending a denominator to a vector
+bias <- center(error_mat, enframe = TRUE, method="proj") %>%
+    dplyr::rename(Bhat = Center)
+
+#Estimate uncertainty in bias estimate
+bootreps <- bootrep_center(error_mat,  method="proj") %>%
+    dplyr::rename(Bhat = Center)
+
+#Plot bootstraps
+library(ggridges)
+gg.boot <- ggplot(bootreps, aes(x = Bhat-1, y = Taxon, fill=Taxon)) +
+    geom_density_ridges(scale = 4) + theme_ridges() +
+    geom_vline(xintercept = 0, color = "black") +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0)) + 
+  ggtitle("Bootstrap error estimates") +
+  scale_fill_brewer(palette = "Spectral")
+
+#summarise bootstraps
+bootreps.summary <- bootreps %>%
+    group_by(Taxon) %>%
+    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat)) 
+bias0 <- left_join(bias, bootreps.summary, by = "Taxon") 
+
+
+#Bar chart of bias for each taxa 
+gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
+    geom_bar(stat="identity")+
+    geom_errorbar(aes(ymin = (Gm_mean-1) - (Gm_se-1), ymax = (Gm_mean-1) + (Gm_se-1), width=0.2)) +
+    geom_point(aes(y=Gm_mean-1)) +
+    scale_fill_brewer(palette="Spectral")+
+    scale_colour_brewer(palette="Spectral") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) + 
+  ylab("Bias") +
+  #ggtitle(primers[i]) +
+  expand_limits(y = c(-2, 4)) +
+  theme(legend.position = "none")
+
+bootreps.pw <- bootreps %>%
+    compute_ratios(group_vars = ".id")
+summary.pw <- bootreps.pw %>%
+    group_by(Taxon.x, Taxon.y) %>%
+    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
+
+ratios <- joint %>%
+  #filter(Type=="Est") %>%
+  filter(material == "Carpophilus Adults") %>%
+    compute_ratios %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
+    filter(!is.nan(Error), Taxon.x < Taxon.y)
+
+ratios.pred <- summary.pw %>%
+    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
+    filter(Taxon.x < Taxon.y)
+
+ggplot(ratios, aes(Pair, Error, color = Sample)) +
+    geom_hline(yintercept = 1, color = "grey") +
+  geom_point(data = ratios.pred,
+        aes(Pair, Gm_mean), inherit.aes = FALSE,
+        shape = 3, size = 5, color = "black") +
+    geom_pointrange(data = ratios.pred, aes(y = Gm_mean, 
+            ymin = Gm_mean / Gm_se^2, ymax = Gm_mean * Gm_se^2), 
+        color = "black") +
+      geom_text(aes(label=Sample),position = position_jitter(width=0.25, height=0)) +
+    scale_y_log10() +
+    coord_flip()
+
+```
+
+# Calibration
+
+## Mclaren model
+```{R}
+#Calibration
+cal <- joint %>%
+    left_join(bias, by = c("Taxon")) %>%
+    dplyr::mutate(Calibrated = Abundance / Bhat) 
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+# Could assume that all other taxa have a bias of 1 and just set them to that?
+cal.prop <- cal %>%
+    filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) 
+
+gg.clrcal <- cal.prop %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(material~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using model of Mclaren et al 2019")
+
+#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
+
+```
+
+## Linear model
+```{r Linear model}
+## Linear model
+main1 <- joint %>%
+  filter(material == "Carpophilus Adults") %>%
+  filter(Type=="Est") %>%
+  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
+  group_by(Sample) %>%
+  mutate_at(vars(Abundance, Actual), ~ . / sum(.))%>%
+  dplyr::select(Sample, Taxon, Abundance, Actual, material) %>% 
+  ungroup()
+
+bias.slm <- main1 %>%
+    group_by(Taxon) %>%
+    nest() %>%
+    mutate(fit = map(data, ~lm(Abundance ~ 0 + Actual, data = .)),
+           tidied = map(fit, broom::tidy)) %>%
+  #unnest(data) %>%
+  unnest(tidied) %>%
+  select(Taxon, estimate, std.error)
+
+
+gg.linearcal <- joint %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / estimate) %>%
+    group_by(Sample) %>%
+  filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using linear model")
+
+```
+
+
+# Compare models
+```{r Compare models}
+#Plot expected vs observed
+
+correction <- joint %>%
+    left_join(bias0, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / Bhat) %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(lm = Abundance / estimate) %>%
+    group_by(Sample) %>%
+  filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
+    mutate_at(vars(Abundance, Calibrated, Actual, lm), ~ . / sum(.)) %>% 
+    ungroup() %>%
+    dplyr::select(Sample, Taxon, Actual, Calibrated, Abundance, lm) %>%
+  rename(Observed = Abundance) %>%
+  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual)  %>%
+  mutate(Type = factor(Type, levels = c("Observed", "lm", "Calibrated"))) %>%
+  filter(!is.nan(Abundance), Actual > 0) %>%
+  distinct()
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+col <- c(Observed= "#f7f7f7", lm = "#ef8a62", Calibrated = "#67a9cf")
+
+gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
+  geom_point(aes(fill=Type), size=3, alpha=0.8, shape=21, stroke=1, color="black") + 
+  geom_abline(slope=1, intercept = 0) +
+  stat_cor(aes(color=Type), label.x = 0.1)  + 
+  facet_grid(~Taxon) +
+  #xlim(0,1) + 
+  #ylim(0,1) + 
+  scale_fill_manual(values=col) + 
+  scale_colour_manual(values=col) +
+  #theme_bw() + 
+  ylab("Observed")
+
+#MSE
+pred <- cal %>%
+    mutate(`No bias` = 1) %>%
+    rename(`Estimated bias` = Bhat) %>%
+    gather("Bias_type", "Bhat", 
+        `No bias`, `Estimated bias`) %>%
+    mutate_by(c(Sample, Bias_type), Predicted = close_elts(Actual * Bhat)) %>%
+    mutate(Bias_type = factor(Bias_type, 
+            c("No bias", "Estimated bias")))
+
+
+error <- pred %>%
+    group_by(material, Bias_type) %>%
+    filter(Actual > 0) %>%
+    summarize(
+        MSE.prop = mean((Observed0 - Predicted)^2),
+        MSE.logit = mean((logit(Observed0) - logit(Predicted))^2),
+        RMSE.logit = sqrt(mean( (logit(Observed0) - logit(Predicted))^2 )),
+        )
+error
+
+## Need to display this with standard error rather than 
+```
+
+
+## Omic plotr
+
+```{r plot}
+
 
 
 #New function
@@ -901,7 +1220,7 @@ library(omicplotR)
 Filtering options - Recreate function in omicplotR::omicplotr.filter() - Or can i do this in phyloseq
 ```{r}
 min.count <- 100
-min.prop <- 0.1
+min.prop <- 0.01
 max.prop <- 1
 min.sum <- 1
 min.reads <- 1000
@@ -1199,326 +1518,6 @@ x.all[sig.ak,]
 
 ```
 
-## Comparison between primers for bias
-
-As part of the mock community analysis, we wish to determine taxonomic bias by looking at observed vs expected reads. To do this, we load dummy sequence, taxonomy, and sample data tables and create a seperate phyloseq object, which will later be merged
-
-This loads a dummy sequence table, taxonomy table, and sample data table and merges it into the existing phyloseq object
-
-Conducted as per: https://mikemc.github.io/metacal/articles/tutorial.html
-
-
-The clr-transformed values are scale-invariant; that is the same ratio is expected to be obtained in a sample with few read counts or an identical sample with many read counts, only the precision of the clr estimate is affected. 
-
-The G(x) cannot be determined for sparse data without deleting, replacing or estimating the 0 count values. Fortunately, there are acceptable methods of dealing with 0 count values as both point estimates using zCompositionsR package
-
-```{r Carpophilus bias}
-
-#Agglomerate to species and subset to primers
-ps_bias <- ps.filt
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
-ps_bias <- tax_glom(ps_bias, taxrank="Species")
-
-
-sam <- psmelt(ps_bias) %>%
-  arrange(Abundance)%>%
-  mutate(Taxon = Species) %>%
-  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp1", replacement = "Brachypeplus_Sp")) %>%
-  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp2", replacement = "Brachypeplus_Sp"))
-
-exp <- read_csv("sample_data/expected_quant_EDIT.csv") %>%
-  gather(Species, Abundance, -X1) %>%
-  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
-  filter(str_detect(X1,"CM")) %>%
-  drop_na() %>%
-  set_colnames(c("Sample","Taxon","Actual"))
-
-#Subset to only those taxa desired for estimation
-#controls <- c("CM1-ex1","CM2-ex1","CM3-ex1")#,,"CM4-ex1","CM5-ex1"
-#Join tables 
-joint <- sam %>%
-  filter(Taxon %in% exp$Taxon) %>%
-  #filter(material =="Carpophilus Adults") %>%
-  #mutate(Type = ifelse(Sample %in% controls, "Est", "Eval")) %>%
-  left_join(exp, by = c("Sample","Taxon")) %>%
-  mutate(Actual = replace_na(Actual, 0)) %>%
-  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
-  mutate(Error = Observed0 / Actual) %>%
-  distinct()
-
-#Build error matrix
-
-error_mat <- joint %>%
-    filter(material == "Carpophilus Adults") %>%
-    #filter(str_detect(Sample, "ex1")) %>%
-    #filter(!is.nan(Error)) %>%
-    build_matrix(Sample, Taxon, Error)
-
-### CALCULATE SE
-
-N <- 2:20
-names(N) <- N
-
-reps <- map_dfr(N, ~bootrep_center(error_mat, R = 4e3, dist = "multinomial",
-        N = ., method = "proj"),
-    .id = "N") %>%
-    dplyr::rename(Bhat = Center)
-
-reps.summary <- reps %>%
-    group_by(N, Taxon) %>%
-    summarize(gm_mean = gm_mean(Bhat), gm_se = gm_sd(Bhat))
-
-r <- range(reps.summary$gm_se)
-names(r) <- r  %>% round(2)
-
-gg.se <- ggplot(reps.summary, aes(x= as.numeric(N), y=gm_se, color = Taxon)) +
-    geom_line(aes(group = Taxon), size=1) +
-    geom_point() +
-    scale_y_continuous(limits = range(c(1, r)), ) +
-    scale_color_brewer(palette="Spectral") +
-    #scale_color_manual(values = values.color, labels = tax_labeller) +
-    #geom_rangeframe(color = "black") +
-    #theme_bw() +
-    labs(x = "Number of controls", y = "Geometric standard error", 
-        title = "Standard error vs. number of control samples", 
-        color = "Taxon")
-gg.se
-
-
-#Estimate bias - can use a denominator by sending a denominator to a vector
-bias <- center(error_mat, enframe = TRUE, method="proj") %>%
-    dplyr::rename(Bhat = Center)
-
-#Estimate uncertainty in bias estimate
-bootreps <- bootrep_center(error_mat,  method="proj") %>%
-    dplyr::rename(Bhat = Center)
-
-#Plot bootstraps
-library(ggridges)
-gg.boot <- ggplot(bootreps, aes(x = Bhat-1, y = Taxon, fill=Taxon)) +
-    geom_density_ridges(scale = 4) + theme_ridges() +
-    geom_vline(xintercept = 0, color = "black") +
-  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
-  scale_x_continuous(expand = c(0, 0)) + 
-  ggtitle("Bootstrap error estimates") +
-  scale_fill_brewer(palette = "Spectral")
-
-#summarise bootstraps
-bootreps.summary <- bootreps %>%
-    group_by(Taxon) %>%
-    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat)) 
-bias0 <- left_join(bias, bootreps.summary, by = "Taxon") 
-
-
-#Bar chart of bias for each taxa 
-
-gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
-    geom_bar(stat="identity")+
-    geom_errorbar(aes(ymin = (Gm_mean-1) - (Gm_se-1), ymax = (Gm_mean-1) + (Gm_se-1), width=0.2)) +
-    geom_point(aes(y=Gm_mean-1)) +
-    scale_fill_brewer(palette="Spectral")+
-    scale_colour_brewer(palette="Spectral") + 
-  theme_bw() +
-  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) + 
-  ylab("Bias") +
-  #ggtitle(primers[i]) +
-  expand_limits(y = c(-2, 4)) +
-  theme(legend.position = "none")
-
-
-```
-
-# Calibration
-
-## Mclaren model
-```{R}
-
-#Subset to only taxa in controls
-control_taxa <- unique(exp$Taxon) 
-
-#Calibration
-cal <- joint %>%
-    left_join(bias, by = c("Taxon")) %>%
-    mutate(Calibrated = Abundance / Bhat) 
-
-#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
-
-# Could assume that all other taxa have a bias of 1 and just set them to that?
-cal.prop <- cal %>%
-    group_by(Sample) %>%
-    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) 
-
-gg.clrcal <- cal.prop %>%
-    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
-  ggplot(aes(Type, Proportion, fill = Taxon)) +
-    geom_col() +
-    facet_wrap(~Sample, drop=TRUE) +
-    theme_bw() +
-    scale_fill_brewer(palette = "Spectral") +
-  ggtitle("Calibration using model of Mclaren et al 2019")
-
-#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
-
-```
-
-## Linear model
-```{r Linear model}
-## Linear model
-main1 <- joint %>%
-  filter(material == "Carpophilus Adults") %>%
-  group_by(Sample) %>%
-  mutate_at(vars(Abundance, Actual), ~ . / sum(.))%>%
-  dplyr::select(Sample, Taxon, Abundance, Actual, material) %>% 
-  ungroup()
-
-bias.slm <- main1 %>%
-    group_by(Taxon) %>%
-    nest() %>%
-    mutate(fit = map(data, ~lm(Abundance ~ 0 + Actual, data = .)),
-           tidied = map(fit, broom::tidy)) %>%
-  #unnest(data) %>%
-  unnest(tidied) %>%
-  select(Taxon, estimate, std.error)
-
-
-plot_df <- joint %>%
-    left_join(bias.slm, by = c("Taxon")) %>%
-    mutate(Calibrated = Abundance / estimate)%>%
-    group_by(Sample) %>%
-    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
-    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated")))
-
-
-gg.linearcal <- joint %>%
-    left_join(bias.slm, by = c("Taxon")) %>%
-    mutate(Calibrated = Abundance / estimate)%>%
-    group_by(Sample) %>%
-    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
-    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
-  ggplot(aes(Type, Proportion, fill = Taxon)) +
-    geom_col() +
-    facet_wrap(~Sample, drop=TRUE) +
-    theme_bw() +
-    scale_fill_brewer(palette = "Spectral") +
-  ggtitle("Calibration using linear model")
-
-```
-
-
-# Compare models
-```{r Compare models}
-#Plot expected vs observed
-
-correction <- joint %>%
-    left_join(bias0, by = c("Taxon")) %>%
-    mutate(Calibrated = Abundance / Bhat) %>%
-    left_join(bias.slm, by = c("Taxon")) %>%
-    mutate(lm = Abundance / estimate) %>%
-    group_by(Sample) %>%
-    mutate_at(vars(Abundance, Calibrated, Actual, lm), ~ . / sum(.)) %>% 
-    ungroup() %>%
-    dplyr::select(Sample, Taxon, Actual, Calibrated, Abundance, lm) %>%
-  rename(Observed = Abundance) %>%
-  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual)  %>%
-  mutate(Type = factor(Type, levels = c("Observed", "lm", "Calibrated"))) %>%
-  filter(!is.nan(Abundance), Actual > 0) %>%
-  distinct()
-
-#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
-
-col <- c(Observed= "#f7f7f7", lm = "#ef8a62", Calibrated = "#67a9cf")
-
-gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
-  geom_point(aes(fill=Type), size=3, alpha=0.8, shape=21, stroke=1, color="black") + 
-  geom_abline(slope=1, intercept = 0) +
-  stat_cor(aes(color=Type), label.x = 0.1)  + 
-  facet_grid(~Taxon) +
-  #xlim(0,1) + 
-  #ylim(0,1) + 
-  scale_fill_manual(values=col) + 
-  scale_colour_manual(values=col) +
-  #theme_bw() + 
-  ylab("Observed")
-
-#MSE
-pred <- cal %>%
-    mutate(`No bias` = 1) %>%
-    rename(`Estimated bias` = Bhat) %>%
-    gather("Bias_type", "Bhat", 
-        `No bias`, `Estimated bias`) %>%
-    mutate_by(c(Sample, Bias_type), Predicted = close_elts(Actual * Bhat)) %>%
-    mutate(Bias_type = factor(Bias_type, 
-            c("No bias", "Estimated bias")))
-
-
-error <- pred %>%
-    group_by(material, Bias_type) %>%
-    filter(Actual > 0) %>%
-    summarize(
-        MSE.prop = mean((Observed0 - Predicted)^2),
-        MSE.logit = mean((logit(Observed0) - logit(Predicted))^2),
-        RMSE.logit = sqrt(mean( (logit(Observed0) - logit(Predicted))^2 )),
-        )
-error
-
-## Need to display this with standard error rather than 
-```
-
-
-#Pairwise bias
-
-```{r}
-
-#Get pairwise bias
-bias.pw <- bias %>%
-  rownames_to_column("Sample") %>%
-    compute_ratios(group_vars = "Sample") %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":"))
-
-
-#Get pairwise boostrap estimates
-bootreps.pw <- bootreps %>%
-    compute_ratios(group_vars = ".id")
-summary.pw <- bootreps.pw %>%
-    group_by(Taxon.x, Taxon.y) %>%
-    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
-bias.pw0 <- left_join(bias.pw, summary.pw, by = c("Taxon.x", "Taxon.y"))
-
-#Plot pairwise bootstrap error estimate
-gg.pwboot <- ggplot(left_join(bias.pw %>%
-                                select(-Bhat) %>%
-                                filter(Taxon.x > Taxon.y), bootreps.pw, by = c("Taxon.x", "Taxon.y")),
-                    aes(x = Bhat-1, y = Pair)) +
-    geom_density_ridges(scale = 2) + theme_ridges() +
-    geom_vline(xintercept = 0, color = "black") +
-  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
-  scale_x_continuous(expand = c(0, 0)) + 
-  ggtitle("Bootstrap error estimates")
-
-
-#Plot pairwise Errors
-ratios <- joint %>%
-    compute_ratios %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
-    filter(!is.nan(Error), Taxon.x < Taxon.y)
-ratios.pred <- bias.pw0 %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
-    filter(Taxon.x < Taxon.y)
-
-gg.bias <- ggplot(ratios, aes(Pair, Error, color = Sample)) +
-    geom_hline(yintercept = 1, color = "grey") +
-    geom_pointrange(data = ratios.pred, aes(y = Bhat, 
-            ymin = Bhat / Gm_se^2, ymax = Bhat * Gm_se^2), 
-        color = "black") +
-    geom_jitter(width = 0.2) +
-    scale_y_log10() +
-    coord_flip()
-```
 
 ## Process synthetic mock positive control
 
