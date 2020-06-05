@@ -1,517 +1,1304 @@
 ---
-title: "R Notebook"
+title: "Metabarcoding bias"
 output: html_notebook
 editor_options: 
   chunk_output_type: console
 ---
+# Introduction
 
+## Analysis structure
+
+Part 1 - Cleanup & Filtering
+
+Part 1 - Comparison of 4 primers for bias
+
+Part 2 - Evaluation of different bias modellign strategies
+
+- naive mean on proportions approach
+- Metacal center function
+  - proj
+  - gm
+  - rss
+- lm on compositional vectors
+- lm on expected / observed
+- lm with CLR in advance?
+- glmnet: multinomial regression with regularization (ie Lasso model)
+- nnet::multinomial neural network regression
+- multinomial regression with random effects
+- Poisson regression with random effects
+- Bayesian multinomial logistic normal models
+  - Stan
+  - Pibble from stray package
+  
+Look at spike in control
+
+Pick the model that reduces the residual mean standard error (RMSE) the most
+
+Should be able to do this within a tidymodels framework with bootsrapping
+
+## Load packages
+```{r setup}
+#Set required packages
+.cran_packages <- c("tidyverse",
+                    "tidymodels",
+                    "patchwork", 
+                    "vegan", 
+                    "seqinr",
+                    "ape", 
+                    "RColorBrewer",
+                    "devtools",
+                    "data.table")
+.bioc_packages <- c("dada2",
+                    "phyloseq", 
+                    "ALDEx2",
+                    "Biostrings")
+
+.inst <- .cran_packages %in% installed.packages()
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)) {
+  if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+  BiocManager::install(.bioc_packages[!.inst], ask = F)
+}
+
+sapply(c(.cran_packages,.bioc_packages), require, character.only = TRUE)
+
+# Github packages
+devtools::install_github("alexpiper/taxreturn")
+devtools::install_github("mikemc/speedyseq")
+devtools::install_github('ggloor/CoDaSeq/CoDaSeq')
+devtools::install_github("mikemc/metacal")
+
+library(taxreturn)
+library(speedyseq)
+library(CoDaSeq)
+library(metacal)
+
+# Create directories
+if(!dir.exists("data")){dir.create("data", recursive = TRUE)}
+if(!dir.exists("reference")){dir.create("reference", recursive = TRUE)}
+if(!dir.exists("output/logs")){dir.create("output/logs", recursive = TRUE)}
+if(!dir.exists("output/csv")){dir.create("output/csv", recursive = TRUE)}
+if(!dir.exists("output/rds")){dir.create("output/rds", recursive = TRUE)}
+if(!dir.exists("sample_data")){dir.create("sample_data", recursive = TRUE)}
+```
+
+## Define themes
+
+```{R theme}
+library(ggthemes)
+base_theme <- theme_tufte() + 
+    theme(
+        text = element_text(size=9, family = ""),
+        strip.text = element_text(size=9, family = ""),
+        # axis.text = element_text(size=8, family = ""),
+        legend.position = "none"
+        )
+
+```
 
 ## Make Phyloseq object
 
-Following taxonomic assignment, the sequence table and taxonomic table are merged into a single phyloseq object alongside the sample info csv.
-
-We then make a plot to evaluate the effectiveness of taxonomic assignment to each rank
 
 ```{r create PS, eval = FALSE}
-seqtab.nochim <- read_rds("output/rds/seqtab_final.rds")
+## Just subset to the last run
+seqtab <- readRDS("output/rds/seqtab_final.rds")
 
-##Fix seqtab names -removing read name, sample number etc
-#rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
-#  str_split_fixed("_",n=Inf) %>%
-#    as_tibble() %>% 
-#  separate(V7, into="rep", sep = "\\.", extra = "drop") %>%
-#  unite(col=SampleID, c("V2","rep"),sep="-") %>%
-#  pull(SampleID) %>%
-#  str_replace(pattern="Rep", replacement="rep")
-#
-#### Rename problematic samples
-#rownames(seqtab.nochim)  <- rownames(seqtab.nochim) %>%
-#  str_replace_all("CM9", "CM8")%>%
-#  str_replace_all("CM10", "CM9")%>%
-#  str_replace_all("CM11", "CM10")%>%
-#  str_replace_all("CML1", "CM11")%>%
-#  str_replace_all("CML2", "CML1")%>%
-#  str_replace_all("CML3", "CML2")%>%
-#  str_replace_all("CML4", "CML3")%>%
-#  str_replace_all("CML5", "CML4")%>%
-#  str_replace_all("CML6", "CML5")%>%
-#  str_replace_all("CT1", "CML6")%>%
-#  str_replace_all("CT2", "CT1")%>%
-#  #str_replace_all("CT3", "CT2")%>%
-#  #str_replace_all("CT4", "CT3")%>%
-#  str_replace_all("CT5", "CT11")%>% # NEED TO CHECK THIS
-#  str_replace_all("CT5dup", "CT5")
+# Add FCID to run 1 samples
+rownames(seqtab)[!str_detect(rownames(seqtab), "Rep") ] <- paste0("CB3DR_", rownames(seqtab)[!str_detect(rownames(seqtab), "Rep") ])
 
-#Run 1 
-rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
-  str_split_fixed("_",n=Inf) %>%
-    as_tibble() %>% 
-  pull(V1)
+# Add FCID to run2 samples
+rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
+                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
+                   !str_detect(rownames(seqtab), "DL|CL")] <- paste0("CK3HD_", rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
+                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
+                   !str_detect(rownames(seqtab), "DL|CL")])
 
-tax_plus <- read_rds("output/rds/tax_IdTaxaExact.rds") 
+	
+# Add FCID to run 3 samples
+rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
+                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
+                   str_detect(rownames(seqtab), "DL|CL")] <- paste0("CJKFJ_", rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
+                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
+                   str_detect(rownames(seqtab), "DL|CL")])
+
+#Reformat sample IDs
+rownames(seqtab)  <- rownames(seqtab) %>%
+  str_remove("\\..*$") %>%
+  str_replace("\\_S[0-9].*\\_...", replacement="_") %>%
+  str_replace("_$", "_1") %>%
+  str_replace("1in10", "1:10")
+
+tax <- readRDS("output/rds/tax_IdTaxaExact.rds") 
+seqs <- DNAStringSet(colnames(seqtab))
+names(seqs) <- seqs
+phy <- readRDS("output/rds/phytree.rds")$tree
+
+##### Rename problematic samples
+#Could do this with the new dplyr functionality
+rownames(seqtab)  <- rownames(seqtab) %>%
+ str_replace_all("D250M1-", "D250M4REP-") %>% # Works
+ str_replace_all("D250M4-", "D250M2REP-") %>% # Works
+ str_replace_all("D250M5-", "D250M3REP-") %>% #FAILED library
+ str_replace_all("D250M3-", "D250M1REP-") %>% #FP suzukii - low reads
+ str_replace_all("D250M2-", "D250M5REP-") %>% #Works
+ str_replace_all("D500M1-", "D500M4REP-") %>% #Works 
+ str_replace_all("D500M4-", "D500M1REP-") %>% #FP Suzukii
+ str_replace_all("D500M5-", "D500M2REP-") %>% #Works
+ str_replace_all("D500M3-", "D500M3REP-") %>% #Works but low reads for Suz + Biarmipes 
+ str_replace_all("D500M2-", "D500M5REP-") %>% #Works
+ str_replace_all("D1000M1-", "D1000M3REP-") %>% #Works
+ str_replace_all("D1000M4-", "D1000M1REP-") %>% #Works
+ str_replace_all("D1000M5-", "D1000M2REP-") %>% #Works
+ str_replace_all("D1000M3-", "D1000M5REP-") %>% #Works
+ str_replace_all("D1000M2-", "D1000M4REP-") %>% #Works
+ str_replace_all("CM10-", "CM9REP-") %>%
+ str_replace_all("CM11-", "CM10REP-") %>%
+ str_replace_all("CM9-", "CM11REP-") %>%
+ str_replace_all("CML2-", "CML6REP-")%>%
+ str_replace_all("CML3-", "CML2REP-")%>%
+ str_replace_all("CML4-", "CML3REP-")%>%
+ str_replace_all("CML5-", "CML4REP-")%>%
+ str_replace_all("CML6-", "CML5REP-")%>%
+ str_replace_all("CT5-", "CT4REP-")%>%
+ str_replace_all("CT4-", "CT5REP-") %>%
+str_replace_all("REP", "")
 
 #Load sample information
 ## ---- samdat ----
-samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE) %>%
-  filter(!duplicated(sample_id)) %>%
-  filter(FCID== "CB3DR") %>% # change for other runs
-  magrittr::set_rownames(.$sample_id) %>%
-  dplyr::select(c("sample_id", "ExtractID",
-                  "geo_loc_name", "material", "treatment", "material",
-                  "target_subfragment", "F_primer", "R_primer",
-                  "FCID", "seq_platform_ID"))
-#Display samDF
-head(samdf)
+samdf <- read.csv("sample_data/sample_info.csv", header=TRUE) %>% 
+  janitor::clean_names() %>%
+  mutate(sample_id = case_when(
+    fcid=="HLVKYDMXX" ~ paste0(sample_name, "_", replicate),
+    !fcid=="HLVKYDMXX" ~ paste0(fcid, "_", sample_name, "_", replicate)
+  ))  %>%
+  filter(!(index=="ATCGATCG" & index2=="ATCACACG"), #CT11-ex1 duplicated
+         !(index=="TCGCTGTT" & index2=="ACTCCATC") # CT12-ex1 duplicated
+         ) %>%
+  filter(!fcid=="CK3HD") %>%
+  mutate(type = case_when(
+    str_detect(sample_id, "D[0-9][0-9][0-9]M|D[0-9][0-9][0-9][0-9]M|DM[0-9]")  ~ "DrosMock",
+    str_detect(sample_id, "SPD")  ~ "SPD",
+    str_detect(sample_id, "ACV")  ~ "ACV",
+    str_detect(sample_id, "DC")  ~ "DC",
+    str_detect(sample_id, "Sach")  ~ "Sachet",
+    str_detect(sample_id, "FF")  ~ "FF",
+    str_detect(sample_id, "NTC")  ~ "NTC",
+    str_detect(sample_id, "DLarv")  ~ "DrosLarv",
+    str_detect(sample_id, "POS|SynMock")  ~ "POS",
+    str_detect(sample_id, "extblank|BLANK")  ~ "Extblank",
+    str_detect(sample_id, "pcrblank")  ~ "PCRblank",
+    str_detect(sample_id, "CT")  ~ "CarpTrap",
+    str_detect(sample_id, "CM[0-9]")  ~ "CarpMock",
+    str_detect(sample_id, "CML[0-9]")  ~ "CarpLarval"
+  )) %>%
+  mutate(target_subfragment = case_when(
+    str_detect(fprimer, "GGDACWGGWTGAACWGTWTAYCCHCC") & str_detect(rprimer, "GTRATWGCHCCDGCTARWACWGG") ~ "fwhF2-fwhR2n",
+    str_detect(fprimer, "ACWGGWTGRACWGTNTAYCC") & str_detect(rprimer, "ARYATDGTRATDGCHCCDGC") ~ "BF1-BR1",
+    str_detect(fprimer, "GGDRCWGGWTGAACWGTWTAYCCNCC") & str_detect(rprimer, "TATDGTRATDGCHCCNGC") ~ "SauronS878-HexCOIR4",
+    str_detect(fprimer, "GGDACWGGWTGAACWGTWTAYCCHCC") & str_detect(rprimer, "TATDGTRATDGCHCCNGC") ~ "fwhF2-HexCOIR4",
+  )) %>%
+  magrittr::set_rownames(.$sample_id)
+
+# Will probably need to rename the seqtabs and append the flowcell number onto the samples before they are merged
 
 ## ---- phyloseq ----
-ps <- phyloseq(tax_table(tax_plus), sample_data(samdf),
-               otu_table(seqtab.nochim, taxa_are_rows = FALSE))
+ps <- phyloseq(tax_table(tax), 
+               sample_data(samdf),
+               otu_table(seqtab, taxa_are_rows = FALSE),
+               phy_tree(phy),
+               refseq(seqs))
 
-if(nrow(seqtab.nochim) > nrow(sample_data(ps))){warning("Warning: All samples not included in phyloseq object, check sample names match the sample metadata")}
+if(nrow(seqtab) > nrow(sample_data(ps))){warning("Warning: All samples not included in phyloseq object, check sample names match the sample metadata")}
 
 rownames(samdf)[which(!rownames(sample_data(ps))  %in% rownames(samdf))]
+rownames(sample_data(ps))[which(!rownames(samdf)  %in% rownames(sample_data(ps)))]
 
-## Subset to carpophilus
+# Rename all taxa
+taxa_names(ps) <- paste0("SV", seq(ntaxa(ps)),"-",tax_table(ps)[,7])
+
+saveRDS(ps, "output/rds/ps_idtaxaExact.rds") 
 
 #Rename synthetic orders
 tax_table(ps)[,2][which(str_detect(tax_table(ps)[,7], "Synthetic"))] <- "Arthropoda"
 
+#Subset to carpophilus
 ps <- ps %>%
-  subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae")) %>%
+  subset_samples(str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]")
+  ) %>%
   subset_taxa(Phylum == "Arthropoda") %>%
   filter_taxa( function(x) mean(x) > 0, TRUE) 
+dir.create("output/csv")
+dir.create("output/csv/unfiltered/")
 
-rm_samples <- "CT11|CM7|CT3"
-ps <- subset_samples(ps, !str_detect(sample_names(ps), rm_samples)) # Drop Undetermined reads
+##Export raw csv
+export <- speedyseq::psmelt(ps) %>%
+  filter(observed > 0)
+write.csv(export, file = "output/csv/rawdata.csv")
 
+#Summary export
+seqateurs::summarise_taxa(ps, "Species", "sample_name") %>%
+  filter(str_detect(sample_name, "NTC")) %>%
+  #filter(str_detect(Species, "Drosophila|Scaptodrosophila")) %>%
+  spread(key="sample_name", value="totalRA") %>%
+  write.csv(file = "output/csv/unfiltered/spp_sum.csv")
+
+seqateurs::summarise_taxa(ps, "Genus", "sample_name") %>%
+  spread(key="sample_name", value="totalRA") %>%
+  write.csv(file = "output/csv/unfiltered/gen_sum.csv")
+
+##Output fasta of all ASV's - Name each one by abundance + taxonomic assignment
+seqateurs::ps_to_fasta(ps, "output/all_taxa.fasta")
 ```
 
 
-## Process replicates 
+### Summary statistics
 
-In this section we will estimate within sample consistency using Kulczynski distance, which is a presence/absense distance measure.
+```{r sum taxa}
+# N unique species and samples
+speedyseq::psmelt(ps) %>%
+  summarise(n_extracts = n_distinct(sample_name), n_samples = n_distinct(sample_name))
 
-To ensure the reproducibility of detection, all PCR replicates that had a high Kulczynski distance to other replicates within the same sample were removed.
+# Spread of reads
+speedyseq::psmelt(ps) %>%
+  group_by(sample_name) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  ungroup() %>%
+  summarise(mean = mean(Abundance), 
+            se = sd(Abundance)/sqrt(length(Abundance)),
+            max = max(Abundance),
+            min = min(Abundance))
 
-Following this, we only retained ASV's that were present in at least 2 different replicates from each sample
+# Spread of ASVs
+speedyseq::psmelt(ps) %>%
+  group_by(sample_name) %>%
+  dplyr::filter(Abundance > 0) %>%
+  summarise(counts = n_distinct(OTU)) %>%
+  ungroup() %>%
+  summarise(mean = mean(counts), 
+            se = sd(counts)/sqrt(length(counts)),
+            max = max(counts),
+            min = min(counts))
 
-Adapted from Mike mclarens code: https://github.com/benjjneb/dada2/issues/745
+#Fraction of reads assigned to each taxonomic rank
+speedyseq::psmelt(ps) %>%
+  gather("Rank","Name", rank_names(ps)) %>%
+  group_by(Rank) %>% 
+  mutate(Name = replace(Name, str_detect(Name, "__"), NA)) %>% # This line turns the "__" we added to lower ranks back to NA's
+  dplyr::summarise(Reads_classified = sum(Abundance * !is.na(Name))) %>%
+  mutate(Frac_reads = Reads_classified / sum(sample_sums(ps))) %>%
+  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  arrange(Rank)
 
-This could probably go before taxonomic assignment?
+#Fraction of ASV's assigned to each taxonomic rank
+tax_table(ps) %>%
+  as("matrix") %>%
+  as_tibble(rownames="OTU") %>%
+  gather("Rank","Name",rank_names(ps)) %>%
+  group_by(Rank) %>%
+  mutate(Name = replace(Name, str_detect(Name, "__"), NA)) %>% # This line turns the "__" we added to lower ranks back to NA's
+  dplyr::summarise(OTUs_classified = sum(!is.na(Name))) %>%
+  mutate(Frac_OTUs = OTUs_classified / ntaxa(ps)) %>%
+  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  arrange(Rank)
 
-```{r replicates}
+# Unique taxa at each rank
+speedyseq::psmelt(ps) %>%
+  dplyr::select(rank_names(ps)) %>%
+  pivot_longer(everything(),
+               names_to = "Rank",
+               values_to = "value") %>%
+  mutate(value = case_when(
+    str_detect(value, "__") ~ as.character(NA),
+    !str_detect(value, "__") ~ value
+  )) %>%
+  drop_na() %>%
+  group_by(Rank) %>%
+  summarise_all(list(n_distinct)) %>%
+  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  arrange(Rank)
+```
 
+## Taxon filtering
+
+```{R taxon filt}
+get_taxa_unique(ps, "Order")
+
+ps # Check the number of taxa prior to removal
+ps0 <- ps %>%
+  subset_taxa(
+    Phylum == "Arthropoda" & 
+    Class %in% c("Insecta", "Arachnida", "Collembola")
+  )
+ps # Confirm that the taxa were removed
+get_taxa_unique(ps0, "Phylum")
+get_taxa_unique(ps0, "Class")
+get_taxa_unique(ps0, "Order")
+```
+
+
+## Merge replicates 
+
+```{r merge replicates}
 # Merge replicates
-  ps.merged <- ps %>%
-    merge_samples(group = "ExtractID")
+ps.merged <- ps0 %>%
+    merge_samples(group = "sample_name", fun="sum")
 
 #This loses the sample metadata - Need to add it agian
-samdf <- read.csv("sample_data/Sample_info.csv", header=TRUE)  %>%
-  filter(!duplicated(ExtractID))  %>%
-  magrittr::set_rownames(.$ExtractID) %>%
-  dplyr::select(c("sample_id", "ExtractID",
-                  "geo_loc_name", "material", "treatment",
-                  "target_subfragment", "F_primer", "R_primer",
-                  "FCID", "seq_platform_ID"))
+sample_data(ps.merged) <- sample_data(ps0) %>%
+  filter(!duplicated(sample_name)) %>%
+  magrittr::set_rownames(.$sample_name)
 
-sample_data(ps.merged) <- samdf
-ps.merged <- filter_taxa(ps.merged, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
-
+ps1 <- ps.merged
 ```
 
 
+# Get expected and observed across all runs
 
+Subset to just fwhF2-fwhR2n
 
-As part of the mock community analysis, we wish to determine taxonomic bias by looking at observed vs expected reads. To do this, we load dummy sequence, taxonomy, and sample data tables and create a seperate phyloseq object, which will later be merged
+```{r primer comparison}
+ps_bias <- ps1 %>%
+  subset_samples(type %in% c("CarpMock",  "CarpTrap", "CarpLarval")) %>%
+  subset_samples(fcid %in% c("HLVKYDMXX", "CB3DR")) %>%
+  subset_samples(target_subfragment == "fwhF2-fwhR2n") %>%
+  filter_taxa( function(x) mean(x) > 0, TRUE) 
 
-This loads a dummy sequence table, taxonomy table, and sample data table and merges it into the existing phyloseq object
-
-Conducted as per: https://mikemc.github.io/metacal/articles/tutorial.html
-
-
-The clr-transformed values are scale-invariant; that is the same ratio is expected to be obtained in a sample with few read counts or an identical sample with many read counts, only the precision of the clr estimate is affected. 
-
-The G(x) cannot be determined for sparse data without deleting, replacing or estimating the 0 count values. Fortunately, there are acceptable methods of dealing with 0 count values as both point estimates using zCompositionsR package
-
-```{r Carpophilus bias}
-#Remove anything not assigned below the root rank
-#ps.filt <- ps.merged %>%
-#  subset_samples(!str_detect(sample_names(ps.merged), "-s-"))
-
-#Agglomerate to species and subset to primers
-ps_bias <- ps
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
-ps_bias <- tax_glom(ps_bias, taxrank="Species")
+ps_bias <- speedyseq::tax_glom(ps_bias, taxrank="Species")
 
-taxa_names(ps_bias) <- paste0("SV", seq(ntaxa(ps_bias)),"-",tax_table(ps_bias)[,7])
-
-sam <- psmelt(ps_bias) %>%
-  arrange(Abundance)%>%
-  mutate(Taxon = Species) %>%
-  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp1", replacement = "Brachypeplus_Sp")) %>%
-  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp2", replacement = "Brachypeplus_Sp")) %>%
+exp <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
+  dplyr::rename(sample_name = X1) %>%
+  pivot_longer(-sample_name,
+               names_to= "taxon",
+               values_to= "expected") %>%
+  mutate(taxon = str_replace(taxon, pattern=" ",replacement="_"),
+         sample_name = str_remove(sample_name, "-exp*.$")) %>%
+  dplyr::filter(!is.na(sample_name),
+  str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]"),
+  expected > 0) %>%
   distinct()
 
-exp <- read_csv("sample_data/expected_quant_EDIT.csv") %>%
-  gather(Species, Abundance, -X1) %>%
-  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
-  filter(str_detect(X1,"CM|CT")) %>%
-  drop_na() %>%
-  set_colnames(c("Sample","Taxon","Actual"))
+#plot expected
+exp %>% 
+  group_by(sample_name) %>%
+  mutate_at(vars(expected), ~ . / sum(.) ) %>% #Convert to proportions
+  ggplot(aes(x=sample_name, y=expected, fill=taxon)) +
+  geom_col(position="stack") + 
+  scale_fill_brewer(palette="Spectral") +
+  theme(legend.position = "bottom") +
+  labs(x = "Sample Name", y= "Expected relative abundance")
 
-#Subset to only those taxa desired for estimation
-#controls <- c("CM1-ex1","CM2-ex1","CM3-ex1","CM5-ex1", "CM6-ex1", "CM6-ex2","CM9-ex1","CM9-ex2")
-#controls <- c("CM6-ex1","CM6-ex2","CM7-ex1","CM7-ex2","CM9-ex1","CM9-ex2")
+#Get obsered
+sam <- speedyseq::psmelt(ps_bias) %>%
+  janitor::clean_names() %>%
+  mutate(taxon = species) %>%
+  filter(!str_detect(genus, "__")) %>%#Remove unclassified
+  dplyr::select(sample_name, taxon, abundance, target_subfragment, fcid, material_type = type) %>%
+  mutate(sample_name = sample_name %>%
+           str_remove_all("BF1-BR1-|SauronS878-HexCOIR4-|fwhF2-HexCOIR4-|fwhF2-fwhR2n-") %>%
+           str_remove("HLVKYDMXX_"),
+         sample_id = paste0(fcid, "_", sample_name),
+         sample_name = sample_name %>%
+           str_remove("-ex[0-9]")) 
+
 #Join tables 
 joint <- sam %>%
-  filter(Taxon %in% exp$Taxon) %>%
-  filter(material =="Carpophilus Adults") %>%
-  group_by(Taxon, Sample, target_subfragment, material) %>% 
-  summarise(Abundance = sum(Abundance)) %>%
+  filter(taxon %in% exp$taxon,
+         sample_name %in% exp$sample_name) %>%
+  left_join(exp, by = c("sample_name","taxon")) %>%
+  dplyr::rename(observed = abundance) %>%
+  mutate(expected = replace_na(expected, 0),
+         observed0 = (observed + 0.5) * (expected > 0),
+         error = observed0 / expected) %>%
+  distinct() %>%
+  group_by(sample_id) %>%
+  mutate(observed.prop=observed, expected.prop=expected) %>%
+  mutate_at(vars(observed.prop,  expected.prop), ~ . / sum(.) ) %>% #Convert to proportions
+  ungroup()
+```
+
+#Visualise errors
+
+```{r visualise errors}
+## Visualise errors in proportions
+joint %>% 
+  filter(expected > 0) %>%
+  mutate_at(vars(expected.prop, observed.prop), logit) %>%
+  ggplot(aes(expected.prop, observed.prop, color = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7) +
+  scale_color_brewer(palette="Spectral")+
+  facet_grid(material_type~fcid)+
+  theme_bw()+
+  labs(title = "Observed vs. expected proportions (log-odds)",
+       color = "Taxon",
+       x="Expected",
+       y="Observed") 
+
+# Visualise the error in all pairwise ratios
+joint %>%
+  filter(expected > 0) %>%
+  dplyr::mutate(Taxon = taxon %>%
+                  str_replace("^.+_", paste0(str_extract(taxon, "."), "_"))) %>% #Shorten genus names
+    compute_ratios(group_vars = c("sample_id", "fcid", "material_type")) %>%
+    filter(!is.na(expected)) %>%
+    mutate(pair = paste(Taxon.x, Taxon.y, sep = ":")) %>% 
+  ggplot(aes(pair, error, colour=sample_id)) +
+  geom_jitter(alpha=0.7) +
+  geom_hline(yintercept = 1) +
+  scale_y_log10() +
+  facet_grid(material_type~fcid)+
+  theme_bw()+
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle=45, hjust=1)) +
+  labs(x = "Taxon ratios",
+       y = "Error in taxon ratios")
+
+```
+
+# Estimate bias
+
+## Split data into training and testing
+
+Think something is up with the way i do this.
+
+Need to split with full sample IDs so we can reclose after calibrating
+
+```{r splits}
+set.seed(666)
+
+#Sample splits
+joint_split <- joint %>%
+  group_by(sample_id) %>%
+  summarise(ntaxa=n()) %>%
+  initial_split(strata=ntaxa)
+
+
+joint_train <- joint %>%
+  filter(sample_id %in% training(joint_split)$sample_id)
+joint_test <- joint %>%
+  filter(sample_id %in% testing(joint_split)$sample_id)
+
+table(joint_train$sample_id %in% joint_test$sample_id)
+table(joint_test$sample_id %in% joint_train$sample_id)
+```
+
+
+## Mean proportions
+
+```{r mean proportions}
+# Compare these fits!  
+fit_prop <- joint_train %>%
+  filter(expected > 0) %>%
+  mutate(error = observed.prop / expected.prop) %>%
+  group_by(material_type, taxon) %>%
+  summarise(.pred = mean(error))
+
+#results
+prop_results_train <- joint_train %>%
+  left_join(fit_prop) %>%
+  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
+  mutate(
+    predicted = expected * .pred, 
+    observed = observed.prop
+  )%>%
+  group_by(sample_id) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
+
+prop_results_train %>%
+  group_by(material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+prop_results_test <- joint_test %>%
+  left_join(fit_prop) %>%
+  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
+  mutate(
+    predicted = expected * .pred, 
+    observed = observed.prop
+  )%>%
+  dplyr::rename(estimated=.pred) %>%
+  group_by(sample_id) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
+
+prop_results_test %>%
+  group_by(material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+```
+
+
+## Fitting models to proportions
+Estimate bias using a simple linear model on proportions 
+
+```{r simple lm}
+# LM
+lm_spec <- linear_reg() %>%
+  set_engine(engine = "lm")
+
+lm_spec
+
+fit_lm <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(taxon, material_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(taxon, material_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(lm_obj = map(train, ~fit(lm_spec, observed.prop ~ 0 + expected.prop, data = .)),
+           pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
+           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data))
+    ) 
+
+# RF
+rf_spec <- rand_forest(mode = "regression") %>%
+  set_engine("ranger")
+
+rf_spec
+
+fit_rf <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(taxon, material_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(taxon, material_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(rf_obj = map(train, ~fit(rf_spec, observed.prop ~ 0 + expected.prop, data = .)),
+           pred_train = map2(rf_obj, train, function(.model, .data) predict(.model, .data)),
+           pred_test = map2(rf_obj, test, function(.model, .data) predict(.model, .data))
+    ) 
+
+#results train set
+lm_results_train <- fit_lm %>%
+  unnest(pred_train, train) %>%
+  mutate(
+    observed = observed.prop,
+    model = "lm"
+  ) %>%
+  bind_rows(fit_rf %>%
+    unnest(pred_train, train) %>%
+    mutate(
+      observed = observed.prop,
+      model = "rf"
+    ))%>%
+  mutate(predicted = .pred)
+
+lm_results_train %>%
+  group_by(model, material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Results test set
+lm_results_test <- fit_lm %>%
+  unnest(pred_test, test) %>%
+  mutate(
+    observed = observed.prop,
+    model = "lm"
+  ) %>%
+  bind_rows(fit_rf %>%
+    unnest(pred_test, test) %>%
+    mutate(
+      observed = observed.prop,
+      model = "rf"
+    )) %>%
+  mutate(predicted = .pred)
+
+lm_results_test %>%
+  group_by(model, material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Visualise
+lm_results_test %>%
+  mutate(train = "testing") %>%
+  bind_rows(lm_results_train %>%
+    mutate(train = "training")) %>%
+  ggplot(aes(logit(predicted), logit(observed), colour = model)) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  base_theme+
+  geom_rangeframe(colour="black")+
+  geom_point(alpha = 0.5) +
+  facet_wrap(~train) +
+  theme(legend.position = "bottom")+
+  labs(
+    x = "logit(Predicted)",
+    y = "logit(Observed)",
+    colour = "Type of model"
+  )
+
+```
+
+## Fitting models to compositional vectors
+
+Here we are using regression on the compositional difference between O and A
+
+```{R compositional regressions}
+fit_complm <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(lm_obj = map(train, ~fit(lm_spec, center_elts(observed0 / expected) ~ 0 + taxon, data = .)),
+           pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
+           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data))
+    ) 
+
+# RF
+fit_comprf <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(rf_obj = map(train, ~fit(rf_spec, center_elts(observed0 / expected) ~ 0 + taxon, data = .)),
+           pred_train = map2(rf_obj, train, function(.model, .data) predict(.model, .data)),
+           pred_test = map2(rf_obj, test, function(.model, .data) predict(.model, .data))
+    ) 
+
+#results
+comp_results_train <- fit_complm %>%
+  unnest(pred_train, train) %>%
+  dplyr::select(material_type, sample_id,fcid, expected, observed.prop, .pred) %>%
+  mutate(
+    predicted = expected * .pred, 
+    observed = observed.prop,
+    model = "lm"
+  ) %>%
+  bind_rows(fit_comprf %>%
+    unnest(pred_train, train) %>%
+      dplyr::select(material_type, sample_id,fcid, expected, observed.prop, .pred) %>%
+    mutate(
+      predicted = expected * .pred, 
+      observed = observed.prop,
+      model = "rf"
+    )) %>%
+  group_by(sample_id, model) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
+
+comp_results_train %>%
+  group_by(model, material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Results test set
+comp_results_test <- fit_complm %>%
+  unnest(pred_test, test) %>%
+  mutate(
+    predicted = expected * .pred, 
+    observed = observed.prop,
+    model = "lm"
+  ) %>%
+  bind_rows(fit_comprf %>%
+    unnest(pred_test, test) %>%
+    mutate(
+      predicted = expected * .pred, 
+      observed = observed.prop,
+      model = "rf"
+    )) %>%
+  group_by(sample_id, model) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
+
+comp_results_test %>%
+  group_by(model, material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Visualise
+comp_results_test %>%
+  mutate(train = "testing") %>%
+  bind_rows(comp_results_train %>%
+    mutate(train = "training")) %>%
+  ggplot(aes(logit(predicted), logit(observed), colour = model)) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  base_theme+
+  geom_rangeframe(colour="black")+
+  geom_point(alpha = 0.5) +
+  facet_wrap(~train) +
+  theme(legend.position = "bottom")+
+  labs(
+    x = "logit(Predicted)",
+    y = "logit(Observed)",
+    colour = "Type of model"
+  )
+```
+
+## Fitting models to CLR transformed vectors
+
+```{r clr}
+# Fit to 
+fit_clrlm <- joint_train %>%
+    filter(expected > 0) %>%
+  group_by(sample_id) %>%
+  mutate(clr_error = clr(observed0 /expected)) %>%
   ungroup() %>%
- # filter(target_subfragment == "fwhF2-fwhR2n") %>%
-  #mutate(Type = ifelse(Sample %in% controls, "Est", "Eval")) %>%
-  left_join(exp, by = c("Sample","Taxon")) %>%
-  mutate(Actual = replace_na(Actual, 0)) %>%
-  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
-  mutate(Error = Observed0 / Actual) %>%
-  distinct()
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(lm_obj = map(train, ~fit(lm_spec,clr_error ~ 0 + taxon, data = .)),
+           pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
+           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data))
+    ) 
 
-#Estimate bias by target_
-bias <- joint %>%
-    group_by(target_subfragment, Taxon) %>%
-    summarize(Bias = gm_mean(Error)) %>%
-    mutate(Bias = center_elts(Bias)) %>%
-    ungroup
+# RF
+fit_clrrf <- joint_train  %>%
+  filter(expected > 0) %>%
+  group_by(sample_id) %>%
+  mutate(clr_error = clr(observed0 /expected)) %>%
+  ungroup() %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(rf_obj = map(train, ~fit(rf_spec, clr_error ~ 0 + taxon, data = .)),
+           pred_train = map2(rf_obj, train, function(.model, .data) predict(.model, .data)),
+           pred_test = map2(rf_obj, test, function(.model, .data) predict(.model, .data))
+    ) 
 
-
-stm <- joint %>%
-    left_join(bias, by = c("target_subfragment", "Taxon")) %>%
+#results
+clr_results_train <- fit_clrlm %>%
+  unnest(pred_train, train) %>%
+  dplyr::select(material_type, sample_id,fcid, expected, observed.prop, .pred) %>%
+  mutate(
+    predicted = expected * exp(.pred), 
+    observed = observed.prop,
+    model = "lm"
+  ) %>%
+  bind_rows(fit_clrrf %>%
+    unnest(pred_train, train) %>%
+      dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
     mutate(
-        Residual = Error / Bias,
-        Predicted = Actual * Bias
-    )
+      predicted = expected * exp(.pred), 
+      observed = observed.prop,
+      model = "rf"
+    )) %>%
+  group_by(sample_id, model) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
 
-reps <- stm %>%
-    group_by(target_subfragment) %>%
-    nest %>%
+clr_results_train %>%
+  group_by(model, material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Results test set
+clr_results_test <- fit_clrlm %>%
+  unnest(pred_test, test) %>%
+  mutate(
+    predicted = expected * exp(.pred), 
+    observed = observed.prop,
+    model = "lm"
+  ) %>%
+  bind_rows(fit_clrrf %>%
+    unnest(pred_test, test) %>%
     mutate(
-        Error_matrix = map(data, build_matrix, "Sample", "Taxon", "Error"),
-        Bootreps = map(Error_matrix, bootrep_center, R = 4e3, 
-            method = "proj"))%>%
-    unnest(Bootreps) %>%
-    dplyr::rename(Bias = Center)
-stats <- reps %>%
-    group_by(target_subfragment, Taxon) %>%
-    summarize(gm_mean = gm_mean(Bias), gm_se = gm_sd(Bias)) %>%
-    ungroup
+      predicted = expected * exp(.pred), 
+      observed = observed.prop,
+      model = "rf"
+    )) %>%
+  group_by(sample_id, model) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
 
-bias <- left_join(bias, stats, by = c("target_subfragment", "Taxon"))
+clr_results_test %>%
+  group_by(model, material_type) %>%
+  rmse(truth = observed, estimate = predicted)
 
-#Plot bootstraps
+# Visualise
+clr_results_test %>%
+  mutate(train = "testing") %>%
+  bind_rows(clr_results_train %>%
+    mutate(train = "training")) %>%
+  ggplot(aes(logit(predicted), logit(observed), colour = model)) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  base_theme+
+  geom_rangeframe(colour="black")+
+  geom_point(alpha = 0.5) +
+  facet_wrap(~train) +
+  theme(legend.position = "bottom")+
+  labs(
+    x = "logit(Predicted)",
+    y = "logit(Observed)",
+    colour = "Type of model"
+  )
+
+```
+
+
+## metacal
+
+This approach treats the abundances and errors as compositional vectors
+
+```{r Calculate bias}
+# Compare these fits!  
+fit_metacal <- joint_train %>%
+    group_by(material_type) %>%
+    nest() %>%
+  dplyr::rename(train=data) %>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(material_type) %>%
+  nest() %>%
+    dplyr::rename(test=data)) %>%
+    mutate(
+        fit = map(train, function(x){
+        err_mat <- x %>%
+          dplyr::select(sample_id, taxon, error) %>%
+          pivot_wider(id_cols= sample_id,
+                      names_from = "taxon",
+                      values_from = "error",
+                      values_fill = list(error=NaN)) %>%
+          column_to_rownames("sample_id") %>%
+          as.matrix() 
+        rows_to_keep <- rowSums(err_mat, na.rm=TRUE) > 0
+        cols_to_keep <- colSums(err_mat, na.rm=TRUE) > 0
+        err_mat <- err_mat[rows_to_keep, cols_to_keep]
+        #Fit different metacal centering methods
+        center(err_mat, method="proj", enframe=TRUE) %>%
+        magrittr::set_colnames(c("taxon", ".pred"))
+        })) %>%
+    unnest(fit) 
+
+#results
+metacal_results_train <- joint_train %>%
+  left_join(fit_metacal) %>%
+  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
+  mutate(
+    predicted = expected * .pred, 
+    observed = observed.prop
+  )%>%
+  group_by(sample_id) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
+
+metacal_results_train %>%
+  group_by(material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+metacal_results_test <- joint_test %>%
+  left_join(fit_metacal) %>%
+  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
+  mutate(
+    predicted = expected * .pred, 
+    observed = observed.prop
+  )%>%
+  group_by(sample_id) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  dplyr::filter(expected > 0)
+
+metacal_results_test %>%
+  group_by(material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Visualise
+metacal_results_test %>%
+  mutate(train = "testing") %>%
+  bind_rows(metacal_results_train %>%
+    mutate(train = "training")) %>%
+  ggplot(aes(logit(predicted), logit(observed))) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  base_theme+
+  geom_rangeframe(colour="black")+
+  geom_point(alpha = 0.5) +
+  facet_wrap(~train) +
+  theme(legend.position = "bottom")+
+  labs(
+    x = "logit(Predicted)",
+    y = "logit(Observed)"
+  )
+
+```
+
+
+
+# Evaluate all model fits
+
+```{r evaluate models}
+all_fits_train <- do.call("list",                         mget(grep("results_train",names(.GlobalEnv),value=TRUE))) %>%
+  bind_rows(.id="model2") 
+
+all_fits_test <- do.call("list",                     mget(grep("results_test",names(.GlobalEnv),value=TRUE))) %>%
+  bind_rows(.id="model2") 
+
+fits <- all_fits_train %>%
+  mutate(train = "Training set") %>%
+  bind_rows(all_fits_test %>%
+    mutate(train = "Test set")) %>%
+  mutate(model2 = model2 %>%
+           str_remove("_results.*$") %>%
+           paste0(model) %>%
+           str_remove("NA")) %>%
+  dplyr::select(model=model2, taxon, material_type, sample_name, sample_id, fcid, expected, observed, predicted, train, observed.prop) 
+
+# missing the predicted
+
+error <- fits %>%
+  group_by(model, material_type, train) %>%
+  rmse(truth = observed, estimate = predicted) 
+
+# plot rmse
+error %>%
+  ggplot(aes(x=model, y=.estimate, fill=model)) +
+  geom_col() +
+  base_theme+
+  geom_rangeframe() +
+  facet_grid(material_type~train) +
+  scale_fill_brewer(palette="Paired") +
+  theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+# Visualise
+fits %>%
+  ggplot(aes(logit(predicted), logit(observed), colour = sample_id)) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  base_theme+
+  geom_rangeframe(colour="black")+
+  geom_point(alpha = 0.5) +
+  coord_fixed() + 
+  facet_grid(train~model) +
+  #theme(legend.position = "bottom")+
+  labs(x = "log-odds(Predicted proportion)", 
+    y = "log-odds(Observed proportion)",
+    colour = "Sample",
+    title="Bias model fits") 
+
+```
+
+## How well do the estimated bias recover the true composition
+
+```{r calibration}
+cal <- fits %>%
+    ungroup() %>%
+    dplyr::mutate(calibrated = observed.prop / estimated) %>%
+    group_by(sample_id, model) %>%
+    mutate_at(vars(calibrated), ~ . / sum(., na.rm=TRUE) ) 
+
+
+ggplot(cal, aes(x=taxon, y= odds(calibrated) / odds(expected.prop), 
+        color = taxon, shape=target_subfragment)) +
+    geom_hline(yintercept=1, alpha=0.8)+
+    geom_jitter(width = 0.1, height = 0) +
+    geom_rangeframe(color = "black") + 
+    scale_y_log10() + 
+    base_theme+
+    facet_grid(material_type ~ model) +
+    labs(x = "Taxon", 
+        y = "Odds calbirated / expected",
+        Colour = "Taxon",
+        shape = "Primer pair") +
+    coord_flip() +
+    theme(
+        panel.spacing.x = unit(1, "lines"),
+        legend.position = "bottom")
+```
+
+# Old metacal analyis
+```{r metacal2}
+
+#Get predictions and SE
+bias.metacal <- joint %>%
+    left_join(bias, by = c("target_subfragment", "material_type", "taxon")) %>%
+    mutate(
+        res_proj = error / est_proj,
+        res_gm = error / est_gm,
+        res_rss = error / est_rss,
+        pred_proj = expected * est_proj, #Remember these predictions are from the EXPECTED
+        pred_gm = expected * est_gm,
+        pred_rss = expected * est_rss
+    ) %>%
+  left_join(bootreps %>%
+    group_by(target_subfragment, material_type, taxon) %>%
+    summarise(gm_mean = gm_mean(bias), gm_se = gm_sd(bias)) %>%
+    ungroup, by = c("target_subfragment", "material_type", "taxon") )
+
+
+#Bootstrapped estimate of bias
+bootreps <- joint_train %>%
+  dplyr::group_by(target_subfragment, material_type) %>%
+    nest() %>%
+    mutate(
+        bootreps = map(data, function(x){
+        err_mat <- x %>%
+          dplyr::select(sample_id, taxon, error) %>%
+          pivot_wider(id_cols= sample_id,
+                      names_from = "taxon",
+                      values_from = "error",
+                      values_fill = list(error=NaN)) %>%
+          column_to_rownames("sample_id") %>%
+          as.matrix() 
+        rows_to_keep <- rowSums(err_mat, na.rm=TRUE) > 0
+        cols_to_keep <- colSums(err_mat, na.rm=TRUE) > 0
+        err_mat <- err_mat[rows_to_keep, cols_to_keep]
+        bootrep_center(err_mat,
+                       R = 1e3,
+                       dist="dirichlet",
+                       method = "proj")
+        
+        })) %>%
+    unnest(bootreps) %>%
+    dplyr::rename(taxon=Taxon,
+                  bias = Center)
+
+#Get predictions and SE
+bias.metacal <- joint %>%
+    left_join(bias, by = c("target_subfragment", "material_type", "taxon")) %>%
+    mutate(
+        res_proj = error / est_proj,
+        res_gm = error / est_gm,
+        res_rss = error / est_rss,
+        pred_proj = expected * est_proj, #Remember these predictions are from the EXPECTED
+        pred_gm = expected * est_gm,
+        pred_rss = expected * est_rss
+    ) %>%
+  left_join(bootreps %>%
+    group_by(target_subfragment, material_type, taxon) %>%
+    summarise(gm_mean = gm_mean(bias), gm_se = gm_sd(bias)) %>%
+    ungroup, by = c("target_subfragment", "material_type", "taxon") )
+
+# Plot bootstraps
 library(ggridges)
-gg.boot <- ggplot(reps, aes(x = Bias-1, y = Taxon, fill=Taxon)) +
+gg.boot <- ggplot(bootreps, aes(x = bias-1, y = taxon, fill=taxon)) +
     geom_density_ridges(scale = 4) + 
-  #theme_ridges() +
-    geom_vline(xintercept = 0, color = "black", size=2) +
-  facet_wrap(~target_subfragment) +
+    geom_vline(xintercept = 0, color = "grey80", size=1) +
+  facet_grid(material_type~target_subfragment) +
   scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
   scale_x_continuous(expand = c(0, 0), limits=c(-1, 4)) + 
-  ggtitle("Bootstrap standard errors of bias estimates for each primer set") +
   scale_fill_brewer(palette = "Spectral") + 
-  xlab("Efficiancy / Geometric mean") 
+  labs(x = "Efficiancy / Geometric mean",
+       x = "Taxon",
+       fill ="Taxon") 
 
 gg.boot
 
-## Calculate SE as control samples increase
-mat <- stm %>%
-    filter(target_subfragment == "fwhF2-fwhR2n") %>%
-    build_matrix(Sample, Taxon, Error)
+## Calculate SE as control samples increase - just do for the highest number group
+err_mat <- joint %>%
+    filter(target_subfragment == "fwhF2-fwhR2n", material_type == "CarpMock") %>%
+          dplyr::select(sample_id, taxon, error) %>%
+          pivot_wider(id_cols= sample_id,
+                      names_from = "taxon",
+                      values_from = "error") %>%
+          column_to_rownames("sample_id") %>%
+          as.matrix() 
+rows_to_keep <- rowSums(err_mat, na.rm=TRUE) > 0
+cols_to_keep <- colSums(err_mat, na.rm=TRUE) > 0
+err_mat <- err_mat[rows_to_keep, cols_to_keep]
 
 N <- 1:20
 names(N) <- N
-
-reps <- map_dfr(N, ~bootrep_center(reps$Error_matrix[[1]], R = 4e3, dist = "multinomial",
+reps <- map_dfr(N, ~bootrep_center(err_mat, 
+                                   R = 1e3,
+                                   dist = "multinomial",
         N = ., method = "proj"),
     .id = "N") %>%
-    dplyr::rename(Bhat = Center)
+    dplyr::rename(taxon = Taxon,
+                  Bhat = Center)
 
 reps.summary <- reps %>%
-    group_by(N, Taxon) %>%
+    group_by(N, taxon) %>%
     summarize(gm_mean = gm_mean(Bhat), gm_se = gm_sd(Bhat))
 
-r <- range(reps.summary$gm_se)
-names(r) <- r  %>% round(2)
-
-gg.se <- ggplot(reps.summary, aes(x= as.numeric(N), y=gm_se, color = Taxon)) +
-    geom_line(aes(group = Taxon), size=1) +
+gg.se <- ggplot(reps.summary, aes(x= as.numeric(N), y=gm_se, color = taxon)) +
+    geom_line(aes(group = taxon), size=1) +
     geom_point() +
-    scale_y_continuous(limits = range(c(1, r)), ) +
     scale_color_brewer(palette="Spectral") +
-    #scale_color_manual(values = values.color, labels = tax_labeller) +
-    #geom_rangeframe(color = "black") +
-    #theme_bw() +
     labs(x = "Number of controls", y = "Geometric standard error", 
         title = "Standard error vs. number of control samples", 
         color = "Taxon")
 gg.se
+```
+
+
+
+
+## Bootstrapped seperate regression models
+
+Fit a bootstrapped linear model on both proportions and CLR transformed counts
+
+```{r bootstrapped}
+lm_dat <- joint %>%
+  filter(expected > 0) %>%
+  group_by(sample_name) %>%
+  mutate(clr_observed = clr(observed0),
+         clr_expected = clr(expected)) %>%
+  ungroup() %>%
+  group_by(taxon, target_subfragment, material_type)
+
+group_name <- group_keys(lm_dat) %>%
+  unite(col="name", everything(), sep=";") %>%
+  pull(name)
+lm_dat <- lm_dat %>%
+  group_split() %>%
+  set_names(group_name)
+
+set.seed(606)
+boots <- purrr::map(lm_dat, bootstraps, times=100, apparant=TRUE)
+
+# Fit model to bootstraps
+boot_models <- boots %>% 
+  purrr::map(function(x){ 
+    x <- x %>%
+      mutate(
+        fit_clr = map(splits,~lm(clr_observed ~ 0 + expected, data = .)),
+        fit_lm = map(splits, ~  lm(observed ~ 0 + expected, data = .)),
+        coef_clr = map(fit_clr, tidy),
+        coef_lm = map(fit_lm, tidy),
+        aug_clr = map(fit_clr, augment),
+        aug_lm = map(fit_lm, augment)
+        )
+    
+    }) 
+
+# Get coefficients
+boot_coefs <- boot_models %>% 
+  purrr::map(function(x){ 
+    x <- x %>%
+   pivot_longer(c("coef_clr","coef_lm"), 
+          names_to="model",
+          values_to = "coef_info")%>%
+      unnest(coef_info)
+  }) %>%
+  bind_rows(.id="name") %>%
+  tidyr::separate(name, into=c("taxon", "target_subfragment", "material_type"), sep=";")
+
+
+# Calculate CIs using percentile method
+bias.lmboot <- boot_models %>%
+  purrr::map(function(x){
+    bind_rows(int_pctl(x, coef_clr) %>% mutate(model = "clrboot"),
+              int_pctl(x, coef_lm) %>% mutate(model = "lmboot"))
+              }) %>%
+  bind_rows(.id="name") %>%
+  tidyr::separate(name, into=c("taxon", "target_subfragment", "material_type"), sep=";") %>%
+  mutate(se = (.upper - .lower) / 3.92)  #3,92 for 95% CIs
+
+bias.lmboot 
+ggplot(boot_coefs, aes(x=estimate, fill=taxon, group=taxon)) +
+  geom_histogram(binwidth = 0.1, alpha=0.5) +
+  facet_grid(target_subfragment ~ material_type, scales = "free") +
+  #geom_vline(aes(xintercept = .estimate), data = bias.lmboot, col = "red") +
+  #geom_vline(aes(xintercept = .lower), data = bias.lmboot, col = "blue") +
+  #geom_vline(aes(xintercept = .upper), data = bias.lmboot, col = "blue") +
+  labs(x = "Estimate",
+       y = "Bootstraps",
+       fill="Taxon")
+
+# Plot fits
+boot_aug <- boot_models %>% 
+  purrr::map(function(x){ 
+    x %>%
+   pivot_longer(c("aug_clr","aug_lm"), 
+          names_to="model",
+          values_to = "augmented")%>%
+      unnest(augmented)
+    }) %>%
+  bind_rows(.id="name") %>%
+  tidyr::separate(name, into=c("taxon", "target_subfragment", "material_type" ), sep=";") 
+
+ggplot(boot_aug %>% filter(model == "aug_lm"), aes(x=expected, y=observed, colour=taxon)) +
+  geom_line(aes(y = .fitted, group = id), alpha = .2) +
+  geom_point() +
+  #geom_line(data=bias.clrboot, aes(y=.estimate),col= "black", inherit.aes = FALSE) +
+  facet_grid(target_subfragment ~taxon, scales = "free") +
+  theme(legend.position = "none")
+
+ggplot(boot_aug %>% filter(model == "aug_clr"), aes(x=clr_expected, y=clr_observed, colour=taxon)) +
+  geom_line(aes(y = .fitted, group = id), alpha = .2) +
+  geom_point() +
+  #geom_line(data=bias.clrboot, aes(y=.estimate),col= "black", inherit.aes = FALSE) +
+  facet_grid(target_subfragment ~taxon, scales = "free") +
+  theme(legend.position = "none")
 
 ```
 
-# Calibration
+## Compositional linear regression
 
-## Mclaren model
-```{R}
-#Calibration
-cal <- joint %>%
-    left_join(bias, by = c("Taxon", "target_subfragment")) %>%
-    dplyr::mutate(Calibrated = Abundance / Bias) 
+really need to understand how mike mclaren formulates his generalised bias regression model from :
+https://mikemc.github.io/presentations/lab-meetings/20191004/Rmd/slides.html#15
 
-#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+Is he just doing a log ratio regression on the errors?
 
-# Could assume that all other taxa have a bias of 1 and just set them to that?
-cal.prop <- cal %>%
-    #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
-    group_by(Sample, target_subfragment) %>%
-    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) 
+ie lm(Error ~ 0 + expected, data = .)
 
-cal.prop <- cal.prop %>%
-    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
-  ggplot(aes(Type, Proportion, fill = Taxon)) +
-    geom_col() +
-    facet_wrap(target_subfragment~Sample, drop=TRUE) +
-    theme_bw() +
-    scale_fill_brewer(palette = "Spectral") +
-  ggtitle("Calibration using model of Mclaren et al 2019")
+```{r compositional regression}
+# Example log ratio regression from https://www.r-bloggers.com/logratio-regression-a-simple-way-to-model-compositional-data/
 
-#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
+data(ArcticLake)
+df <- as.data.frame(ArcticLake)
+#With the D-dimension outcome [p_1, p_2…p_D], we can derive a [D-1]-dimension outcome [log(p_2 / p_1)…log(p_D / p_1)] and then estimate a multivariate regression based on the new outcome.
 
-```
+#This is taking the log ratio (ALR) to sand first - to CLR this would take the ratio against rowmean?
+lm(cbind(log(silt / sand), log(clay / sand)) ~ depth, data = df)
 
-## Linear model
-```{r Linear model}
-## Linear model
-main1 <- joint %>%
-  #filter(material == "Carpophilus Adults") %>%
-  #filter(Type=="Est") %>%
-  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
-  group_by(Sample) %>%
-  mutate_at(vars(Abundance, Actual), ~ . / sum(.))%>%
-  dplyr::select(Sample, Taxon, Abundance, Actual, target_subfragment, material) %>% 
-  ungroup()
+#see what the model matrix looks like
+model.matrix(cbind(log(silt / sand), log(clay / sand)) ~ depth, data = df)
 
+model.matrix(cbind(silt, clay) ~ depth, data = df)
 
+#Since log(x / y) = log(x) – log(y), we can also estimate the model with log(sand) as an offset term.
+lm(cbind(log(silt), log(clay)) ~ depth + offset(log(sand)), data = df)
 
-bias.slm <- main1 %>%
-    group_by(target_subfragment, Taxon) %>%
+model.matrix(cbind(log(silt), log(clay)) ~ depth + offset(log(sand)), data = df)
+#Alternatively, we can also use the comp.reg function in the Compositional package.
+Compositional::comp.reg(as.matrix(df[, 1:3]), df[, 4])
+
+# Test using offset
+complm <- joint %>%
+  filter(expected > 0) %>%
+  #dplyr::select(sample_id, taxon, observed0)
+  group_by(material_type, target_subfragment)  %>%
     nest() %>%
-    mutate(fit = map(data, ~lm(Abundance ~ 0 + Actual, data = .)),
-           tidied = map(fit, broom::tidy)) %>%
-  #unnest(data) %>%
-  unnest(tidied) %>%
-  select(Taxon, estimate, std.error, target_subfragment)
+    mutate(fit = map(data, ~lm(log(error) ~ 0 + taxon, data = .))
+    ) 
+
+%>%
+  pivot_longer(c("fit_clr","fit_lm"), 
+               names_to="model",
+               values_to = "fit") %>%
+  mutate(tidied = map(fit, broom::tidy),
+         aug = map(fit, broom::augment)) %>%
+  unnest(tidied, aug, data) %>%
+  dplyr::select(taxon, target_subfragment, material_type, sample_name, model, estimate, std.error, clr_observed, expected, .fitted) 
 
 
-gg.linearcal <- joint %>%
-    left_join(bias.slm, by = c("Taxon", "target_subfragment")) %>%
-    mutate(Calibrated = Abundance / estimate) %>%
-    group_by(Sample, target_subfragment) %>%
-  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
-    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
-    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
-    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
-  ggplot(aes(Type, Proportion, fill = Taxon)) +
-    geom_col() +
-    facet_wrap(target_subfragment~Sample, drop=TRUE) +
-    theme_bw() +
-    scale_fill_brewer(palette = "Spectral") +
-  ggtitle("Calibration using linear model")
-
-```
-
-
-# Compare models
-```{r Compare models}
-#Plot expected vs observed
-
-correction <- joint %>%
-    #filter(material == "Carpophilus Adults") %>%
-    left_join(bias, by = c("Taxon", "target_subfragment")) %>%
-    mutate(Calibrated = Abundance / Bias) %>%
-    left_join(bias.slm, by = c("Taxon", "target_subfragment")) %>%
-    mutate(lm = Abundance / estimate) %>%
-    group_by(Sample, target_subfragment) %>%
-  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
-    mutate_at(vars(Abundance, Calibrated, Actual, lm), ~ . / sum(.)) %>% 
-    ungroup() %>%
-    dplyr::select(Sample, material, target_subfragment, Taxon, Actual, Calibrated, Abundance, lm) %>%
-  dplyr::rename(Observed = Abundance) %>%
-  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual, -material, -target_subfragment)  %>%
-  mutate(Type = factor(Type, levels = c("Observed", "lm", "Calibrated"))) %>%
-  filter(!is.nan(Abundance), Actual > 0) %>%
-  distinct()
-
-#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
-
-#col <- c(Observed= "#f7f7f7", lm = "#ef8a62", Calibrated = "#67a9cf")
-
-gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
-  geom_point(aes(colour=Type, shape=Type), size=3, alpha=0.8, stroke=1) + 
-  geom_abline(slope=1, intercept = 0) +
-  stat_cor(aes(color=Type), label.x = 0.1)  + 
-  facet_grid(~target_subfragment) +
-  #xlim(0,1) + 
-  #ylim(0,1) + 
-  #scale_fill_manual(values=col) + 
-  #scale_colour_manual(values=col) +
-  #theme_bw() + 
-  ylab("Observed")
-
-
-preds <- joint %>%
-    #filter(material == "Carpophilus Adults") %>%
-    left_join(bias, by = c("Taxon", "target_subfragment")) %>%
-    mutate(Calibrated = Abundance / Bias) %>%
-    left_join(bias.slm, by = c("Taxon", "target_subfragment")) %>%
-    mutate(lm = Abundance / estimate) %>%
-    mutate(Counts = Observed0) %>%
-    group_by(Sample, target_subfragment) %>%
-    mutate_at(vars(Observed0, Calibrated, Actual, lm, Counts), ~ . / sum(.)) %>% 
-    ungroup() %>%
-    gather("Model", "Predicted", Calibrated, lm, Counts)
-
-
-ggplot(preds, aes(logit(Predicted), logit(Observed0), color = Taxon)) +
-    geom_abline(intercept = 0, slope = 1, color = "grey") +
-    geom_jitter(width = 0.1, height = 0) +
-    facet_grid(target_subfragment ~ Model) +
-    labs(x = "log-odds(Predicted proportion)", 
-        y = "log-odds(Observed proportion)") +
-    coord_fixed() +
-    theme(
-        panel.spacing.x = unit(1, "lines"),
-        legend.position = "bottom",
-    ) + scale_color_brewer(palette="Spectral")
-```
-
-
-# Calibrating batch effects
-
-```{r}
-#Estimate differential bias to one 'reference' protocol (or primer)
-stmW <- joint %>%
-    select(Taxon, Sample, target_subfragment, Observed0) %>%
-    mutate(Sample =str_split_fixed(Sample, "-", n=3) %>% as_tibble() %>% pull(V3)) %>%
-    spread(target_subfragment, Observed0) %>%
-    dplyr::mutate(Actual = `BF1-BR1`) %>%
-    gather("target_subfragment", "Observed", `BF1-BR1`, `fwhF2-fwhR2n`, `fwhF2-HexCOIR4`, `SauronS878-HexCOIR4`) %>%
-    mutate(Error = Observed / Actual)
-biasW_est <- stmW %>%
-    #filter(Set == "Est") %>%
-    group_by(target_subfragment, Taxon) %>%
-    summarize(BiasW = gm_mean(Error)) %>%
-    mutate(BiasW = center_elts(BiasW))
-biasW_est %>%
-    spread(target_subfragment, BiasW)
-
-#Calibrate all samples
-stm0 <- joint %>%
-    left_join(bias, by = c("target_subfragment", "Taxon")) %>%
-    left_join(biasW_est, by = c("target_subfragment", "Taxon")) %>%
-    mutate_by(Sample, 
-        Calibrated_to_Actual = close_elts(Observed0 / Bias),
-        Calibrated_to_W = close_elts(Observed0 / BiasW)
-    )
-
-stm1 <- stm0 %>%
-    gather("Type", "Abundance", 
-        Observed0, Actual, Calibrated_to_Actual, Calibrated_to_W) %>%
-    select(Taxon, Sample, target_subfragment, Type, Abundance) %>%
-    group_by(Sample, Type) %>%
-    mutate(Clr = clr(Abundance)) %>%
-    ungroup
-
-#Get matrix with saples as rows for PCA
-temp <- stm1 %>%
-    unite("Sample_Type", Sample, Type, sep = ":") %>%
-    select(Sample_Type, Taxon, Clr) %>%
-    spread(Taxon, Clr)
-mat <- temp %>%
-    select(-Sample_Type) %>%
-    as("matrix")
-rownames(mat) <- temp$Sample_Type
-corner(mat)
-
-#PCA
-pcx <- prcomp(mat)
-tb <- as_tibble(pcx$x[,c(1,2)], rownames='Sample_Type') %>%
-    separate(Sample_Type, c("Sample", "Type"), sep = ":") %>%
-    left_join(sam, by = "Sample")
-tb <- tb %>%
-    mutate(PC1 = -PC1, PC2 = PC2)
-
-fracvar <- pcx$sdev^2/sum(pcx$sdev^2)
-round(fracvar, 3)
-
-facet_labeller <- function (tb) {
-    tb %>% 
-        mutate_all(str_replace_all, "_", " ") %>%
-        mutate_all(str_replace, " ", "\n")
-}
-type.lvls <- c("Observed", "Calibrated_to_Actual", "Calibrated_to_W")
-actual <- tb %>%
-    filter(Type == "Actual", Sample == "H1") %>%
-    select(PC1, PC2) %>%
-    expand(Type = factor(type.lvls, type.lvls), PC1, PC2)
-tb0 <- tb %>%
-    filter(Type != "Actual") %>%
-    mutate(Type = factor(Type, type.lvls))
-tb.breaks <- 
-    tribble(
-        ~PC1, ~PC2,
-        # min(tb0$PC1), min(tb0$PC2),
-        # actual$PC1[1], actual$PC2[1],
-        # max(tb0$PC1), max(tb0$PC2),
-        )
-tb.range <- 
-    tribble(
-        ~PC1, ~PC2,
-        min(tb0$PC1), min(tb0$PC2),
-        max(tb0$PC1), max(tb0$PC2),
-        )
-p.pca <- ggplot(tb0, aes(PC1, PC2, color = Protocol, shape = Set)) +
-    geom_point(data = actual, aes(PC1, PC2),
-        shape = 3, size = 4, color = "black") +
-    geom_point() +
-    facet_grid(Type ~ ., labeller = facet_labeller) +
-    geom_rangeframe(data = tb.range, aes(PC1, PC2), 
-        color = "black", inherit.aes = FALSE) + 
-    scale_x_continuous(breaks = tb.breaks$PC1, labels = NULL) +
-    scale_y_continuous(breaks = tb.breaks$PC2, labels = NULL) +
-    scale_shape_manual(breaks = c("Est", "Eval"), values = c(1, 16)) +
-    scale_color_manual(values = colors.protocol) + 
-    base_theme +
-    theme(strip.text.y = element_text(angle=0, size = 9)) +
-    # theme(axis.line = element_line()) +
-    labs(title = "Sample ordination", x = strvar[1], y = strvar[2])
-# Label the protocols in the "Observed" plot
-labtb <- tribble(
-    ~x,     ~y,   ~Protocol,
-    -4,    1.5,   "H",
-    -0.5,  1.3,   "Q",
-    -1.85, -0.4,  "W",
-    2.3,    0.7,   "Actual"
-    ) %>%
-    mutate(Type = factor("Observed", type.lvls))
-p.pca <- p.pca +
-    geom_text(data = labtb,
-        aes(x, y, label = Protocol, color = Protocol), 
-        size = 3, inherit.aes = FALSE, show.legend = FALSE)
-p.pca
-
+complm <- joint %>%
+  filter(expected > 0) %>%
+  #dplyr::select(sample_id, taxon, observed0)
+  group_by(material_type, target_subfragment)  %>%
+  nest() %>%
+  mutate(matrix = map(data, function(x){
+    x %>%
+      pivot_wider(id_cols= sample_id,
+                      names_from = "taxon",
+                      values_from = "observed0") %>%
+      column_to_rownames("sample_id") %>%
+      as.matrix} ))
 
 ```
+
 

@@ -23,11 +23,11 @@ If bias is multiplicative - we can try estimate this multiplier and fit  correct
 tb2 <- tibble(
   Taxon = c("T1", "T2", "T3","T4"),
   Individuals = c(1, 1, 1, 1),
-  DNA = c(1.1, 1.2, 0.6, 0.8),
-  Amplicons = c(1.6, 2.4, 1.1, 0.3),
-  Libraries = c(1.65, 2.2,0.95, 0.32),
-  Reads = c(1.45, 2.3, 1, 0.28),
-  ASVs = c(1.5, 2.5, 0.95, 0.34)
+  `DNA extraction` = c(1.1, 1.2, 0.6, 0.8),
+  `PCR` = c(1.6, 2.4, 1.1, 0.3),
+  `Library preparation` = c(1.65, 2.2,0.95, 0.32),
+  `Sequencing` = c(1.45, 2.3, 1, 0.28),
+  `Bioinformatics` = c(1.5, 2.5, 0.95, 0.34)
 ) %>%
   gather("Type", "Abundance",-Taxon) 
 
@@ -38,7 +38,7 @@ gg.multi <- tb2 %>%
   geom_path(aes(group = Taxon),size=1) +
   geom_point(size=2) +
   scale_y_log10(breaks = c(0.1, 0.3, 0.5, 1, 2,3),labels=c(0.1, 0.3, 0.5, 1, 2,3))+
-  scale_x_discrete(limits = c("Individuals","DNA","Amplicons","Libraries","Reads","ASVs")) +
+  scale_x_discrete(limits = c("Individuals","DNA extraction","PCR","Library preparation","Sequencing","Bioinformatics")) +
   scale_color_brewer(palette="Spectral") +
   ggtitle("Multiplicative model of bias") +
   xlab("Step in Metabarcoding workflow") +
