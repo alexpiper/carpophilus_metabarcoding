@@ -1,6 +1,8 @@
 ---
 title: "R Notebook"
 output: html_notebook
+editor_options: 
+  chunk_output_type: console
 ---
 
 
@@ -169,29 +171,69 @@ joint <- sam %>%
   group_by(Taxon, Sample, target_subfragment, material) %>% 
   summarise(Abundance = sum(Abundance)) %>%
   ungroup() %>%
-  filter(target_subfragment == "fwhF2-fwhR2n") %>%
+ # filter(target_subfragment == "fwhF2-fwhR2n") %>%
   #mutate(Type = ifelse(Sample %in% controls, "Est", "Eval")) %>%
   left_join(exp, by = c("Sample","Taxon")) %>%
   mutate(Actual = replace_na(Actual, 0)) %>%
   mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
   mutate(Error = Observed0 / Actual) %>%
-  
   distinct()
 
-#Build error matrix
+#Estimate bias by target_
+bias <- joint %>%
+    group_by(target_subfragment, Taxon) %>%
+    summarize(Bias = gm_mean(Error)) %>%
+    mutate(Bias = center_elts(Bias)) %>%
+    ungroup
 
-error_mat <- joint %>%
-    #filter(Type=="Est") %>%
-    #filter(material == "Carpophilus Adults") %>%
-    #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
+
+stm <- joint %>%
+    left_join(bias, by = c("target_subfragment", "Taxon")) %>%
+    mutate(
+        Residual = Error / Bias,
+        Predicted = Actual * Bias
+    )
+
+reps <- stm %>%
+    group_by(target_subfragment) %>%
+    nest %>%
+    mutate(
+        Error_matrix = map(data, build_matrix, "Sample", "Taxon", "Error"),
+        Bootreps = map(Error_matrix, bootrep_center, R = 4e3, 
+            method = "proj"))%>%
+    unnest(Bootreps) %>%
+    dplyr::rename(Bias = Center)
+stats <- reps %>%
+    group_by(target_subfragment, Taxon) %>%
+    summarize(gm_mean = gm_mean(Bias), gm_se = gm_sd(Bias)) %>%
+    ungroup
+
+bias <- left_join(bias, stats, by = c("target_subfragment", "Taxon"))
+
+#Plot bootstraps
+library(ggridges)
+gg.boot <- ggplot(reps, aes(x = Bias-1, y = Taxon, fill=Taxon)) +
+    geom_density_ridges(scale = 4) + 
+  #theme_ridges() +
+    geom_vline(xintercept = 0, color = "black", size=2) +
+  facet_wrap(~target_subfragment) +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0), limits=c(-1, 4)) + 
+  ggtitle("Bootstrap standard errors of bias estimates for each primer set") +
+  scale_fill_brewer(palette = "Spectral") + 
+  xlab("Efficiancy / Geometric mean") 
+
+gg.boot
+
+## Calculate SE as control samples increase
+mat <- stm %>%
+    filter(target_subfragment == "fwhF2-fwhR2n") %>%
     build_matrix(Sample, Taxon, Error)
 
-### CALCULATE SE
-#
 N <- 1:20
 names(N) <- N
 
-reps <- map_dfr(N, ~bootrep_center(error_mat, R = 4e3, dist = "multinomial",
+reps <- map_dfr(N, ~bootrep_center(reps$Error_matrix[[1]], R = 4e3, dist = "multinomial",
         N = ., method = "proj"),
     .id = "N") %>%
     dplyr::rename(Bhat = Center)
@@ -216,75 +258,6 @@ gg.se <- ggplot(reps.summary, aes(x= as.numeric(N), y=gm_se, color = Taxon)) +
         color = "Taxon")
 gg.se
 
-
-#Estimate bias - can use a denominator by sending a denominator to a vector
-bias <- center(error_mat, enframe = TRUE, method="proj") %>%
-    dplyr::rename(Bhat = Center)
-
-#Estimate uncertainty in bias estimate
-bootreps <- bootrep_center(error_mat,  method="proj") %>%
-    dplyr::rename(Bhat = Center)
-
-#Plot bootstraps
-library(ggridges)
-gg.boot <- ggplot(bootreps, aes(x = Bhat-1, y = Taxon, fill=Taxon)) +
-    geom_density_ridges(scale = 4) + theme_ridges() +
-    geom_vline(xintercept = 0, color = "black") +
-  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
-  scale_x_continuous(expand = c(0, 0)) + 
-  ggtitle("Bootstrap error estimates") +
-  scale_fill_brewer(palette = "Spectral")
-
-#summarise bootstraps
-bootreps.summary <- bootreps %>%
-    group_by(Taxon) %>%
-    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat)) 
-bias0 <- left_join(bias, bootreps.summary, by = "Taxon") 
-
-
-#Bar chart of bias for each taxa 
-gg.barbias <- ggplot(bias0, aes(Taxon, y=Gm_mean-1,fill=Taxon)) +
-    geom_bar(stat="identity")+
-    geom_errorbar(aes(ymin = (Gm_mean-1) - (Gm_se-1), ymax = (Gm_mean-1) + (Gm_se-1), width=0.2)) +
-    geom_point(aes(y=Gm_mean-1)) +
-    scale_fill_brewer(palette="Spectral")+
-    scale_colour_brewer(palette="Spectral") + 
-  theme_bw() +
-  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) + 
-  ylab("Bias") +
-  #ggtitle(primers[i]) +
-  expand_limits(y = c(-2, 4)) +
-  theme(legend.position = "none")
-
-bootreps.pw <- bootreps %>%
-    compute_ratios(group_vars = ".id")
-summary.pw <- bootreps.pw %>%
-    group_by(Taxon.x, Taxon.y) %>%
-    summarize(Gm_mean = gm_mean(Bhat), Gm_se = gm_sd(Bhat))
-
-ratios <- joint %>%
-  #filter(Type=="Est") %>%
-  filter(material == "Carpophilus Adults") %>%
-    compute_ratios %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
-    filter(!is.nan(Error), Taxon.x < Taxon.y)
-
-ratios.pred <- summary.pw %>%
-    mutate(Pair = paste(Taxon.x, Taxon.y, sep = ":")) %>%
-    filter(Taxon.x < Taxon.y)
-
-ggplot(ratios, aes(Pair, Error, color = Sample)) +
-    geom_hline(yintercept = 1, color = "grey") +
-  geom_point(data = ratios.pred,
-        aes(Pair, Gm_mean), inherit.aes = FALSE,
-        shape = 3, size = 5, color = "black") +
-    geom_pointrange(data = ratios.pred, aes(y = Gm_mean, 
-            ymin = Gm_mean / Gm_se^2, ymax = Gm_mean * Gm_se^2), 
-        color = "black") +
-      geom_text(aes(label=Sample),position = position_jitter(width=0.25, height=0)) +
-    scale_y_log10() +
-    coord_flip()
-
 ```
 
 # Calibration
@@ -293,23 +266,23 @@ ggplot(ratios, aes(Pair, Error, color = Sample)) +
 ```{R}
 #Calibration
 cal <- joint %>%
-    left_join(bias, by = c("Taxon")) %>%
-    dplyr::mutate(Calibrated = Abundance / Bhat) 
+    left_join(bias, by = c("Taxon", "target_subfragment")) %>%
+    dplyr::mutate(Calibrated = Abundance / Bias) 
 
 #To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
 
 # Could assume that all other taxa have a bias of 1 and just set them to that?
 cal.prop <- cal %>%
     #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
-    group_by(Sample) %>%
+    group_by(Sample, target_subfragment) %>%
     mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) 
 
-gg.clrcal <- cal.prop %>%
+cal.prop <- cal.prop %>%
     gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
     mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
   ggplot(aes(Type, Proportion, fill = Taxon)) +
     geom_col() +
-    facet_wrap(material~Sample, drop=TRUE) +
+    facet_wrap(target_subfragment~Sample, drop=TRUE) +
     theme_bw() +
     scale_fill_brewer(palette = "Spectral") +
   ggtitle("Calibration using model of Mclaren et al 2019")
@@ -322,35 +295,37 @@ gg.clrcal <- cal.prop %>%
 ```{r Linear model}
 ## Linear model
 main1 <- joint %>%
-  filter(material == "Carpophilus Adults") %>%
+  #filter(material == "Carpophilus Adults") %>%
   #filter(Type=="Est") %>%
   #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
   group_by(Sample) %>%
   mutate_at(vars(Abundance, Actual), ~ . / sum(.))%>%
-  dplyr::select(Sample, Taxon, Abundance, Actual, material) %>% 
+  dplyr::select(Sample, Taxon, Abundance, Actual, target_subfragment, material) %>% 
   ungroup()
 
+
+
 bias.slm <- main1 %>%
-    group_by(Taxon) %>%
+    group_by(target_subfragment, Taxon) %>%
     nest() %>%
     mutate(fit = map(data, ~lm(Abundance ~ 0 + Actual, data = .)),
            tidied = map(fit, broom::tidy)) %>%
   #unnest(data) %>%
   unnest(tidied) %>%
-  select(Taxon, estimate, std.error)
+  select(Taxon, estimate, std.error, target_subfragment)
 
 
 gg.linearcal <- joint %>%
-    left_join(bias.slm, by = c("Taxon")) %>%
+    left_join(bias.slm, by = c("Taxon", "target_subfragment")) %>%
     mutate(Calibrated = Abundance / estimate) %>%
-    group_by(Sample) %>%
+    group_by(Sample, target_subfragment) %>%
   #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
     mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
     gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
     mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
   ggplot(aes(Type, Proportion, fill = Taxon)) +
     geom_col() +
-    facet_wrap(~Sample, drop=TRUE) +
+    facet_wrap(target_subfragment~Sample, drop=TRUE) +
     theme_bw() +
     scale_fill_brewer(palette = "Spectral") +
   ggtitle("Calibration using linear model")
@@ -364,17 +339,17 @@ gg.linearcal <- joint %>%
 
 correction <- joint %>%
     #filter(material == "Carpophilus Adults") %>%
-    left_join(bias0, by = c("Taxon")) %>%
-    mutate(Calibrated = Abundance / Bhat) %>%
-    left_join(bias.slm, by = c("Taxon")) %>%
+    left_join(bias, by = c("Taxon", "target_subfragment")) %>%
+    mutate(Calibrated = Abundance / Bias) %>%
+    left_join(bias.slm, by = c("Taxon", "target_subfragment")) %>%
     mutate(lm = Abundance / estimate) %>%
-    group_by(Sample) %>%
+    group_by(Sample, target_subfragment) %>%
   #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
     mutate_at(vars(Abundance, Calibrated, Actual, lm), ~ . / sum(.)) %>% 
     ungroup() %>%
-    dplyr::select(Sample,material, Taxon, Actual, Calibrated, Abundance, lm) %>%
-  rename(Observed = Abundance) %>%
-  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual, -material)  %>%
+    dplyr::select(Sample, material, target_subfragment, Taxon, Actual, Calibrated, Abundance, lm) %>%
+  dplyr::rename(Observed = Abundance) %>%
+  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual, -material, -target_subfragment)  %>%
   mutate(Type = factor(Type, levels = c("Observed", "lm", "Calibrated"))) %>%
   filter(!is.nan(Abundance), Actual > 0) %>%
   distinct()
@@ -387,7 +362,7 @@ gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
   geom_point(aes(colour=Type, shape=Type), size=3, alpha=0.8, stroke=1) + 
   geom_abline(slope=1, intercept = 0) +
   stat_cor(aes(color=Type), label.x = 0.1)  + 
-  #facet_grid(material~Taxon) +
+  facet_grid(~target_subfragment) +
   #xlim(0,1) + 
   #ylim(0,1) + 
   #scale_fill_manual(values=col) + 
@@ -395,26 +370,148 @@ gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
   #theme_bw() + 
   ylab("Observed")
 
-#MSE
-pred <- cal %>%
-    mutate(`No bias` = 1) %>%
-    rename(`Estimated bias` = Bhat) %>%
-    gather("Bias_type", "Bhat", 
-        `No bias`, `Estimated bias`) %>%
-    mutate_by(c(Sample, Bias_type), Predicted = close_elts(Actual * Bhat)) %>%
-    mutate(Bias_type = factor(Bias_type, 
-            c("No bias", "Estimated bias")))
+
+preds <- joint %>%
+    #filter(material == "Carpophilus Adults") %>%
+    left_join(bias, by = c("Taxon", "target_subfragment")) %>%
+    mutate(Calibrated = Abundance / Bias) %>%
+    left_join(bias.slm, by = c("Taxon", "target_subfragment")) %>%
+    mutate(lm = Abundance / estimate) %>%
+    mutate(Counts = Observed0) %>%
+    group_by(Sample, target_subfragment) %>%
+    mutate_at(vars(Observed0, Calibrated, Actual, lm, Counts), ~ . / sum(.)) %>% 
+    ungroup() %>%
+    gather("Model", "Predicted", Calibrated, lm, Counts)
 
 
-error <- pred %>%
-    group_by(material, Bias_type) %>%
-    filter(Actual > 0) %>%
-    summarize(
-        MSE.prop = mean((Observed0 - Predicted)^2),
-        MSE.logit = mean((logit(Observed0) - logit(Predicted))^2),
-        RMSE.logit = sqrt(mean( (logit(Observed0) - logit(Predicted))^2 )),
-        )
-error
-
-## Need to display this with standard error rather than 
+ggplot(preds, aes(logit(Predicted), logit(Observed0), color = Taxon)) +
+    geom_abline(intercept = 0, slope = 1, color = "grey") +
+    geom_jitter(width = 0.1, height = 0) +
+    facet_grid(target_subfragment ~ Model) +
+    labs(x = "log-odds(Predicted proportion)", 
+        y = "log-odds(Observed proportion)") +
+    coord_fixed() +
+    theme(
+        panel.spacing.x = unit(1, "lines"),
+        legend.position = "bottom",
+    ) + scale_color_brewer(palette="Spectral")
 ```
+
+
+# Calibrating batch effects
+
+```{r}
+#Estimate differential bias to one 'reference' protocol (or primer)
+stmW <- joint %>%
+    select(Taxon, Sample, target_subfragment, Observed0) %>%
+    mutate(Sample =str_split_fixed(Sample, "-", n=3) %>% as_tibble() %>% pull(V3)) %>%
+    spread(target_subfragment, Observed0) %>%
+    dplyr::mutate(Actual = `BF1-BR1`) %>%
+    gather("target_subfragment", "Observed", `BF1-BR1`, `fwhF2-fwhR2n`, `fwhF2-HexCOIR4`, `SauronS878-HexCOIR4`) %>%
+    mutate(Error = Observed / Actual)
+biasW_est <- stmW %>%
+    #filter(Set == "Est") %>%
+    group_by(target_subfragment, Taxon) %>%
+    summarize(BiasW = gm_mean(Error)) %>%
+    mutate(BiasW = center_elts(BiasW))
+biasW_est %>%
+    spread(target_subfragment, BiasW)
+
+#Calibrate all samples
+stm0 <- joint %>%
+    left_join(bias, by = c("target_subfragment", "Taxon")) %>%
+    left_join(biasW_est, by = c("target_subfragment", "Taxon")) %>%
+    mutate_by(Sample, 
+        Calibrated_to_Actual = close_elts(Observed0 / Bias),
+        Calibrated_to_W = close_elts(Observed0 / BiasW)
+    )
+
+stm1 <- stm0 %>%
+    gather("Type", "Abundance", 
+        Observed0, Actual, Calibrated_to_Actual, Calibrated_to_W) %>%
+    select(Taxon, Sample, target_subfragment, Type, Abundance) %>%
+    group_by(Sample, Type) %>%
+    mutate(Clr = clr(Abundance)) %>%
+    ungroup
+
+#Get matrix with saples as rows for PCA
+temp <- stm1 %>%
+    unite("Sample_Type", Sample, Type, sep = ":") %>%
+    select(Sample_Type, Taxon, Clr) %>%
+    spread(Taxon, Clr)
+mat <- temp %>%
+    select(-Sample_Type) %>%
+    as("matrix")
+rownames(mat) <- temp$Sample_Type
+corner(mat)
+
+#PCA
+pcx <- prcomp(mat)
+tb <- as_tibble(pcx$x[,c(1,2)], rownames='Sample_Type') %>%
+    separate(Sample_Type, c("Sample", "Type"), sep = ":") %>%
+    left_join(sam, by = "Sample")
+tb <- tb %>%
+    mutate(PC1 = -PC1, PC2 = PC2)
+
+fracvar <- pcx$sdev^2/sum(pcx$sdev^2)
+round(fracvar, 3)
+
+facet_labeller <- function (tb) {
+    tb %>% 
+        mutate_all(str_replace_all, "_", " ") %>%
+        mutate_all(str_replace, " ", "\n")
+}
+type.lvls <- c("Observed", "Calibrated_to_Actual", "Calibrated_to_W")
+actual <- tb %>%
+    filter(Type == "Actual", Sample == "H1") %>%
+    select(PC1, PC2) %>%
+    expand(Type = factor(type.lvls, type.lvls), PC1, PC2)
+tb0 <- tb %>%
+    filter(Type != "Actual") %>%
+    mutate(Type = factor(Type, type.lvls))
+tb.breaks <- 
+    tribble(
+        ~PC1, ~PC2,
+        # min(tb0$PC1), min(tb0$PC2),
+        # actual$PC1[1], actual$PC2[1],
+        # max(tb0$PC1), max(tb0$PC2),
+        )
+tb.range <- 
+    tribble(
+        ~PC1, ~PC2,
+        min(tb0$PC1), min(tb0$PC2),
+        max(tb0$PC1), max(tb0$PC2),
+        )
+p.pca <- ggplot(tb0, aes(PC1, PC2, color = Protocol, shape = Set)) +
+    geom_point(data = actual, aes(PC1, PC2),
+        shape = 3, size = 4, color = "black") +
+    geom_point() +
+    facet_grid(Type ~ ., labeller = facet_labeller) +
+    geom_rangeframe(data = tb.range, aes(PC1, PC2), 
+        color = "black", inherit.aes = FALSE) + 
+    scale_x_continuous(breaks = tb.breaks$PC1, labels = NULL) +
+    scale_y_continuous(breaks = tb.breaks$PC2, labels = NULL) +
+    scale_shape_manual(breaks = c("Est", "Eval"), values = c(1, 16)) +
+    scale_color_manual(values = colors.protocol) + 
+    base_theme +
+    theme(strip.text.y = element_text(angle=0, size = 9)) +
+    # theme(axis.line = element_line()) +
+    labs(title = "Sample ordination", x = strvar[1], y = strvar[2])
+# Label the protocols in the "Observed" plot
+labtb <- tribble(
+    ~x,     ~y,   ~Protocol,
+    -4,    1.5,   "H",
+    -0.5,  1.3,   "Q",
+    -1.85, -0.4,  "W",
+    2.3,    0.7,   "Actual"
+    ) %>%
+    mutate(Type = factor("Observed", type.lvls))
+p.pca <- p.pca +
+    geom_text(data = labtb,
+        aes(x, y, label = Protocol, color = Protocol), 
+        size = 3, inherit.aes = FALSE, show.legend = FALSE)
+p.pca
+
+
+```
+

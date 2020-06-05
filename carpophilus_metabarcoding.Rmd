@@ -934,9 +934,11 @@ joint <- sam %>%
 
 error_mat <- joint %>%
     #filter(Type=="Est") %>%
-    filter(material == "Carpophilus Adults") %>%
+    #filter(material == "Carpophilus Adults") %>%
     #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
-    build_matrix(Sample, Taxon, Error)
+  group_by(target_subfragment) %>%
+    build_matrix(Sample, Taxon, Error) %>% 
+  as.numeric()
 
 ### CALCULATE SE
 #
