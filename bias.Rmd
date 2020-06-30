@@ -1,6 +1,6 @@
 ---
 title: "Metabarcoding bias"
-output: html_notebook
+output: html_document
 editor_options: 
   chunk_output_type: console
 ---
@@ -117,7 +117,7 @@ rownames(seqtab)[str_detect(rownames(seqtab), "Rep") &
                    !str_detect(rownames(seqtab), "HLVKYDMXX") & 
                    !str_detect(rownames(seqtab), "DL|CL")])
 
-	
+  
 # Add FCID to run 3 samples
 rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
                    !str_detect(rownames(seqtab), "HLVKYDMXX") & 
@@ -236,7 +236,7 @@ dir.create("output/csv/unfiltered/")
 
 ##Export raw csv
 export <- speedyseq::psmelt(ps) %>%
-  filter(observed > 0)
+  filter(Abundance > 0)
 write.csv(export, file = "output/csv/rawdata.csv")
 
 #Summary export
@@ -349,7 +349,8 @@ ps.merged <- ps0 %>%
 
 #This loses the sample metadata - Need to add it agian
 sample_data(ps.merged) <- sample_data(ps0) %>%
-  filter(!duplicated(sample_name)) %>%
+  as("data.frame") %>%
+  dplyr::filter(!duplicated(sample_name)) %>%
   magrittr::set_rownames(.$sample_name)
 
 ps1 <- ps.merged
@@ -466,9 +467,6 @@ joint %>%
 
 ## Split data into training and testing
 
-Think something is up with the way i do this.
-
-Need to split with full sample IDs so we can reclose after calibrating
 
 ```{r splits}
 set.seed(666)
@@ -492,6 +490,10 @@ table(joint_test$sample_id %in% joint_train$sample_id)
 
 ## Mean proportions
 
+Here we estimate bias as the arithmetic mean of the error in proportions
+
+NOTE: i wonder how this would look if i took the geometric rather than arithmetic mean?
+
 ```{r mean proportions}
 # Compare these fits!  
 fit_prop <- joint_train %>%
@@ -503,10 +505,11 @@ fit_prop <- joint_train %>%
 #results
 prop_results_train <- joint_train %>%
   left_join(fit_prop) %>%
-  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
+ # dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
   mutate(
     predicted = expected * .pred, 
-    observed = observed.prop
+    observed = observed.prop,
+    estimated = .pred
   )%>%
   group_by(sample_id) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
@@ -518,7 +521,7 @@ prop_results_train %>%
 
 prop_results_test <- joint_test %>%
   left_join(fit_prop) %>%
-  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
+  #dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
   mutate(
     predicted = expected * .pred, 
     observed = observed.prop
@@ -536,12 +539,20 @@ prop_results_test %>%
 
 
 ## Fitting models to proportions
-Estimate bias using a simple linear model on proportions 
+
+Here we estimate bias using a simple linear regression model, as well as a random forest regression of the expected and observerd proportions. 
+
+The model is fit seperately to each taxon and material type.
+
+The model is then evaluated seperately on the testing and training datasets
 
 ```{r simple lm}
 # LM
 lm_spec <- linear_reg() %>%
-  set_engine(engine = "lm")
+  set_engine(engine = "lm")%>%
+        step_center(all_numeric()) %>%
+        step_scale(all_numeric()) %>%
+        step_dummy(all_nominal())
 
 lm_spec
 
@@ -557,13 +568,17 @@ fit_lm <- joint_train %>%
   dplyr::rename(test=data)) %>%
   mutate(lm_obj = map(train, ~fit(lm_spec, observed.prop ~ 0 + expected.prop, data = .)),
            pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data))
-    ) 
+           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data)),
+           coef_info = map(lm_obj, tidy)
+    ) %>%
+  unnest(coef_info)
 
 # RF
 rf_spec <- rand_forest(mode = "regression") %>%
-  set_engine("ranger")
-
+  set_engine("ranger") %>%
+        step_center(all_numeric()) %>%
+        step_scale(all_numeric()) %>%
+        step_dummy(all_nominal())
 rf_spec
 
 fit_rf <- joint_train %>%
@@ -594,7 +609,8 @@ lm_results_train <- fit_lm %>%
       observed = observed.prop,
       model = "rf"
     ))%>%
-  mutate(predicted = .pred)
+  mutate(predicted = .pred)%>% 
+    dplyr::select(!where(is.list))
 
 lm_results_train %>%
   group_by(model, material_type) %>%
@@ -613,7 +629,8 @@ lm_results_test <- fit_lm %>%
       observed = observed.prop,
       model = "rf"
     )) %>%
-  mutate(predicted = .pred)
+  mutate(predicted = .pred)%>% 
+    dplyr::select(!where(is.list))
 
 lm_results_test %>%
   group_by(model, material_type) %>%
@@ -641,7 +658,7 @@ lm_results_test %>%
 
 ## Fitting models to compositional vectors
 
-Here we are using regression on the compositional difference between O and A
+Here we fit a simple linear model and random forest regression on the compositional difference between Observed and Expected counts. The compositional error vectors are first geometrically centered, then taxon is used as a predictor.
 
 ```{R compositional regressions}
 fit_complm <- joint_train %>%
@@ -656,8 +673,9 @@ fit_complm <- joint_train %>%
   dplyr::rename(test=data)) %>%
   mutate(lm_obj = map(train, ~fit(lm_spec, center_elts(observed0 / expected) ~ 0 + taxon, data = .)),
            pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data))
-    ) 
+           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data)),
+           coef_info = map(lm_obj, tidy)
+    )
 
 # RF
 fit_comprf <- joint_train %>%
@@ -678,23 +696,24 @@ fit_comprf <- joint_train %>%
 #results
 comp_results_train <- fit_complm %>%
   unnest(pred_train, train) %>%
-  dplyr::select(material_type, sample_id,fcid, expected, observed.prop, .pred) %>%
   mutate(
     predicted = expected * .pred, 
     observed = observed.prop,
+    estimated = .pred,
     model = "lm"
   ) %>%
   bind_rows(fit_comprf %>%
     unnest(pred_train, train) %>%
-      dplyr::select(material_type, sample_id,fcid, expected, observed.prop, .pred) %>%
     mutate(
       predicted = expected * .pred, 
       observed = observed.prop,
+      estimated = .pred,
       model = "rf"
     )) %>%
   group_by(sample_id, model) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0)%>% 
+    dplyr::select(!where(is.list))
 
 comp_results_train %>%
   group_by(model, material_type) %>%
@@ -717,7 +736,8 @@ comp_results_test <- fit_complm %>%
     )) %>%
   group_by(sample_id, model) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0)%>% 
+    dplyr::select(!where(is.list))
 
 comp_results_test %>%
   group_by(model, material_type) %>%
@@ -744,6 +764,8 @@ comp_results_test %>%
 
 ## Fitting models to CLR transformed vectors
 
+Here we fit a simple linear model and random forest regression to centred log ratio transformed error vectors, using taxon as the predictor
+
 ```{r clr}
 # Fit to 
 fit_clrlm <- joint_train %>%
@@ -761,7 +783,8 @@ fit_clrlm <- joint_train %>%
   dplyr::rename(test=data)) %>%
   mutate(lm_obj = map(train, ~fit(lm_spec,clr_error ~ 0 + taxon, data = .)),
            pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data))
+           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data)),
+           coef_info = map(lm_obj, tidy)
     ) 
 
 # RF
@@ -786,23 +809,24 @@ fit_clrrf <- joint_train  %>%
 #results
 clr_results_train <- fit_clrlm %>%
   unnest(pred_train, train) %>%
-  dplyr::select(material_type, sample_id,fcid, expected, observed.prop, .pred) %>%
   mutate(
     predicted = expected * exp(.pred), 
     observed = observed.prop,
+    estimated = exp(.pred),
     model = "lm"
   ) %>%
   bind_rows(fit_clrrf %>%
     unnest(pred_train, train) %>%
-      dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
     mutate(
       predicted = expected * exp(.pred), 
       observed = observed.prop,
+      estimated = exp(.pred),
       model = "rf"
     )) %>%
   group_by(sample_id, model) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0)%>% 
+    dplyr::select(!where(is.list))
 
 clr_results_train %>%
   group_by(model, material_type) %>%
@@ -825,7 +849,8 @@ clr_results_test <- fit_clrlm %>%
     )) %>%
   group_by(sample_id, model) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0)%>% 
+    dplyr::select(!where(is.list))
 
 clr_results_test %>%
   group_by(model, material_type) %>%
@@ -854,10 +879,11 @@ clr_results_test %>%
 
 ## metacal
 
-This approach treats the abundances and errors as compositional vectors
+Here we use the bias estimation approach of *McLaren, M. R., Willis, A. D., & Callahan, B. J. (2019). Consistent and correctable bias in metagenomic sequencing experiments. Elife, 8.* This approach treats the abundances and errors as compositional vectors and estimates the bias as the geometric center of these bias vectors. 
 
-```{r Calculate bias}
-# Compare these fits!  
+This is a compositionally appropriate alternative to taking the arithmetic mean of errors in proportions as above.
+
+```{r metacal}
 fit_metacal <- joint_train %>%
     group_by(material_type) %>%
     nest() %>%
@@ -889,14 +915,15 @@ fit_metacal <- joint_train %>%
 #results
 metacal_results_train <- joint_train %>%
   left_join(fit_metacal) %>%
-  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
   mutate(
     predicted = expected * .pred, 
-    observed = observed.prop
+    observed = observed.prop,
+    estimated = .pred
   )%>%
   group_by(sample_id) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0) %>% 
+    dplyr::select(!where(is.list))
 
 metacal_results_train %>%
   group_by(material_type) %>%
@@ -904,14 +931,14 @@ metacal_results_train %>%
 
 metacal_results_test <- joint_test %>%
   left_join(fit_metacal) %>%
-  dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
   mutate(
     predicted = expected * .pred, 
     observed = observed.prop
   )%>%
   group_by(sample_id) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0)%>% 
+    dplyr::select(!where(is.list))
 
 metacal_results_test %>%
   group_by(material_type) %>%
@@ -937,8 +964,11 @@ metacal_results_test %>%
 ```
 
 
-
 # Evaluate all model fits
+
+Here we compare the accuracy of the bias estimation procedure by looking at the Root Mean Square Error (RMSE) between the observed relative abundances from sequencing, and the predicted relative abundances (Expected * Bias estimate) from each model.
+
+To determine the models predictive ability to new data, we also determine these metrics for a seperate testing set of samples that the model was not trained on.
 
 ```{r evaluate models}
 all_fits_train <- do.call("list",                         mget(grep("results_train",names(.GlobalEnv),value=TRUE))) %>%
@@ -955,13 +985,12 @@ fits <- all_fits_train %>%
            str_remove("_results.*$") %>%
            paste0(model) %>%
            str_remove("NA")) %>%
-  dplyr::select(model=model2, taxon, material_type, sample_name, sample_id, fcid, expected, observed, predicted, train, observed.prop) 
+  dplyr::select(model=model2, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop, observed, predicted, estimated, train, observed.prop) 
 
-# missing the predicted
-
+# Get RMSE
 error <- fits %>%
   group_by(model, material_type, train) %>%
-  rmse(truth = observed, estimate = predicted) 
+  rmse(truth = observed, estimate = predicted) #could also do somethign  else here
 
 # plot rmse
 error %>%
@@ -973,7 +1002,7 @@ error %>%
   scale_fill_brewer(palette="Paired") +
   theme(axis.text.x = element_text(angle=45, hjust = 1))
 
-# Visualise
+# Visualise fits to data
 fits %>%
   ggplot(aes(logit(predicted), logit(observed), colour = sample_id)) +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
@@ -992,31 +1021,45 @@ fits %>%
 
 ## How well do the estimated bias recover the true composition
 
+The opposite side of the coin to the above comparison is determining how well the estimated bias from each model can be used to calibrate the sequenced samples and thus recover the true composition.
+
 ```{r calibration}
 cal <- fits %>%
     ungroup() %>%
     dplyr::mutate(calibrated = observed.prop / estimated) %>%
     group_by(sample_id, model) %>%
-    mutate_at(vars(calibrated), ~ . / sum(., na.rm=TRUE) ) 
+    mutate_at(vars(calibrated), ~ . / sum(., na.rm=TRUE) )  %>%
+    ungroup() 
 
 
-ggplot(cal, aes(x=taxon, y= odds(calibrated) / odds(expected.prop), 
-        color = taxon, shape=target_subfragment)) +
+ggplot(cal, aes(x=taxon, y= odds(calibrated) / odds(expected.prop))) +
     geom_hline(yintercept=1, alpha=0.8)+
-    geom_jitter(width = 0.1, height = 0) +
+  geom_jitter(aes(x=taxon, y= odds(observed.prop) / odds(expected.prop)), colour="grey80", alpha=0.7, width = 0.1, height = 0)+
+    geom_jitter(aes(colour = taxon),alpha=0.7, width = 0.1, height = 0) +
     geom_rangeframe(color = "black") + 
     scale_y_log10() + 
     base_theme+
+    scale_colour_brewer(palette = "Spectral") +
     facet_grid(material_type ~ model) +
     labs(x = "Taxon", 
         y = "Odds calbirated / expected",
-        Colour = "Taxon",
+        colour = "Taxon",
         shape = "Primer pair") +
     coord_flip() +
     theme(
         panel.spacing.x = unit(1, "lines"),
         legend.position = "bottom")
+
 ```
+
+# NExt:
+
+Bootstrap errors
+
+Reduction in errors as function of samples used to estiamte?
+
+
+
 
 # Old metacal analyis
 ```{r metacal2}
