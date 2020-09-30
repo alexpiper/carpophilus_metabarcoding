@@ -77,26 +77,8 @@ library(speedyseq)
 library(CoDaSeq)
 library(metacal)
 
-# Create directories
-if(!dir.exists("data")){dir.create("data", recursive = TRUE)}
-if(!dir.exists("reference")){dir.create("reference", recursive = TRUE)}
-if(!dir.exists("output/logs")){dir.create("output/logs", recursive = TRUE)}
-if(!dir.exists("output/csv")){dir.create("output/csv", recursive = TRUE)}
-if(!dir.exists("output/rds")){dir.create("output/rds", recursive = TRUE)}
-if(!dir.exists("sample_data")){dir.create("sample_data", recursive = TRUE)}
-```
-
-## Define themes
-
-```{R theme}
-library(ggthemes)
-base_theme <- theme_tufte() + 
-    theme(
-        text = element_text(size=9, family = ""),
-        strip.text = element_text(size=9, family = ""),
-        # axis.text = element_text(size=8, family = ""),
-        legend.position = "none"
-        )
+#Source themes
+source('R/themes.R')
 
 ```
 
@@ -104,26 +86,7 @@ base_theme <- theme_tufte() +
 
 
 ```{r create PS, eval = FALSE}
-## Just subset to the last run
 seqtab <- readRDS("output/rds/seqtab_final.rds")
-
-# Add FCID to run 1 samples
-rownames(seqtab)[!str_detect(rownames(seqtab), "Rep") ] <- paste0("CB3DR_", rownames(seqtab)[!str_detect(rownames(seqtab), "Rep") ])
-
-# Add FCID to run2 samples
-rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
-                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
-                   !str_detect(rownames(seqtab), "DL|CL")] <- paste0("CK3HD_", rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
-                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
-                   !str_detect(rownames(seqtab), "DL|CL")])
-
-  
-# Add FCID to run 3 samples
-rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
-                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
-                   str_detect(rownames(seqtab), "DL|CL")] <- paste0("CJKFJ_", rownames(seqtab)[str_detect(rownames(seqtab), "Rep") & 
-                   !str_detect(rownames(seqtab), "HLVKYDMXX") & 
-                   str_detect(rownames(seqtab), "DL|CL")])
 
 #Reformat sample IDs
 rownames(seqtab)  <- rownames(seqtab) %>%
@@ -132,10 +95,10 @@ rownames(seqtab)  <- rownames(seqtab) %>%
   str_replace("_$", "_1") %>%
   str_replace("1in10", "1:10")
 
-tax <- readRDS("output/rds/tax_IdTaxaExact.rds") 
+tax <- readRDS("output/rds/final_tax.rds") 
 seqs <- DNAStringSet(colnames(seqtab))
 names(seqs) <- seqs
-phy <- readRDS("output/rds/phytree.rds")$tree
+phy <- read.tree("output/ultrametric_tree_order_constrained.nwk")
 
 ##### Rename problematic samples
 #Could do this with the new dplyr functionality
@@ -167,18 +130,23 @@ rownames(seqtab)  <- rownames(seqtab) %>%
  str_replace_all("CT4-", "CT5REP-") %>%
 str_replace_all("REP", "")
 
-#Load sample information
-## ---- samdat ----
+
+# Samdf processing --------------------------------------------------------
+
 samdf <- read.csv("sample_data/sample_info.csv", header=TRUE) %>% 
-  janitor::clean_names() %>%
   mutate(sample_id = case_when(
-    fcid=="HLVKYDMXX" ~ paste0(sample_name, "_", replicate),
-    !fcid=="HLVKYDMXX" ~ paste0(fcid, "_", sample_name, "_", replicate)
-  ))  %>%
-  filter(!(index=="ATCGATCG" & index2=="ATCACACG"), #CT11-ex1 duplicated
-         !(index=="TCGCTGTT" & index2=="ACTCCATC") # CT12-ex1 duplicated
-         ) %>%
-  filter(!fcid=="CK3HD") %>%
+    fcid=="HLVKYDMXX" ~ paste0(sample_name, "_", amp_rep),
+    !fcid=="HLVKYDMXX" ~ paste0(fcid, "_", sample_name, "_", amp_rep)
+  )) %>%
+  mutate(extract_id = sample_name) %>%
+  mutate(sample_name = str_remove(sample_name, "-exp*.$")) %>%
+  mutate(sample_name = case_when(
+    fcid=="HLVKYDMXX" ~ sample_name,
+    !fcid=="HLVKYDMXX" ~ paste0(fcid, "_", sample_name)
+  )) %>%
+  filter(!(i7_index=="ATCGATCG" & i5_index=="ATCACACG"), #CT11-ex1 duplicated
+         !(i7_index=="TCGCTGTT" & i5_index=="ACTCCATC") # CT12-ex1 duplicated
+  ) %>%
   mutate(type = case_when(
     str_detect(sample_id, "D[0-9][0-9][0-9]M|D[0-9][0-9][0-9][0-9]M|DM[0-9]")  ~ "DrosMock",
     str_detect(sample_id, "SPD")  ~ "SPD",
@@ -195,12 +163,13 @@ samdf <- read.csv("sample_data/sample_info.csv", header=TRUE) %>%
     str_detect(sample_id, "CM[0-9]")  ~ "CarpMock",
     str_detect(sample_id, "CML[0-9]")  ~ "CarpLarval"
   )) %>%
-  mutate(target_subfragment = case_when(
-    str_detect(fprimer, "GGDACWGGWTGAACWGTWTAYCCHCC") & str_detect(rprimer, "GTRATWGCHCCDGCTARWACWGG") ~ "fwhF2-fwhR2n",
-    str_detect(fprimer, "ACWGGWTGRACWGTNTAYCC") & str_detect(rprimer, "ARYATDGTRATDGCHCCDGC") ~ "BF1-BR1",
-    str_detect(fprimer, "GGDRCWGGWTGAACWGTWTAYCCNCC") & str_detect(rprimer, "TATDGTRATDGCHCCNGC") ~ "SauronS878-HexCOIR4",
-    str_detect(fprimer, "GGDACWGGWTGAACWGTWTAYCCHCC") & str_detect(rprimer, "TATDGTRATDGCHCCNGC") ~ "fwhF2-HexCOIR4",
-  )) %>%
+  magrittr::set_rownames(.$sample_id)
+
+write_csv(samdf, "sample_data/sample_info2.csv")
+
+#Load sample information
+## ---- samdat ----
+samdf <- read.csv("sample_data/sample_info2.csv", header=TRUE) %>%
   magrittr::set_rownames(.$sample_id)
 
 # Will probably need to rename the seqtabs and append the flowcell number onto the samples before they are merged
@@ -218,18 +187,17 @@ rownames(samdf)[which(!rownames(sample_data(ps))  %in% rownames(samdf))]
 rownames(sample_data(ps))[which(!rownames(samdf)  %in% rownames(sample_data(ps)))]
 
 # Rename all taxa
-taxa_names(ps) <- paste0("SV", seq(ntaxa(ps)),"-",tax_table(ps)[,7])
+taxa_names(ps) <- paste0("SV", seq(ntaxa(ps)),"-",tax_table(ps)[,8])
 
 saveRDS(ps, "output/rds/ps_idtaxaExact.rds") 
 
 #Rename synthetic orders
-tax_table(ps)[,2][which(str_detect(tax_table(ps)[,7], "Synthetic"))] <- "Arthropoda"
+tax_table(ps)[,2][which(str_detect(tax_table(ps)[,8], "Synthetic"))] <- "Arthropoda"
 
-#Subset to carpophilus
+#Subset to Drosophila (Remove carpophilus)
 ps <- ps %>%
   subset_samples(str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]")
   ) %>%
-  subset_taxa(Phylum == "Arthropoda") %>%
   filter_taxa( function(x) mean(x) > 0, TRUE) 
 dir.create("output/csv")
 dir.create("output/csv/unfiltered/")
@@ -241,8 +209,7 @@ write.csv(export, file = "output/csv/rawdata.csv")
 
 #Summary export
 seqateurs::summarise_taxa(ps, "Species", "sample_name") %>%
-  filter(str_detect(sample_name, "NTC")) %>%
-  #filter(str_detect(Species, "Drosophila|Scaptodrosophila")) %>%
+  filter(!str_detect(sample_name, "NTC")) %>%
   spread(key="sample_name", value="totalRA") %>%
   write.csv(file = "output/csv/unfiltered/spp_sum.csv")
 
@@ -359,13 +326,12 @@ ps1 <- ps.merged
 
 # Get expected and observed across all runs
 
-Subset to just fwhF2-fwhR2n
 
-```{r primer comparison}
+```{r Make joint}
 ps_bias <- ps1 %>%
   subset_samples(type %in% c("CarpMock",  "CarpTrap", "CarpLarval")) %>%
   subset_samples(fcid %in% c("HLVKYDMXX", "CB3DR")) %>%
-  subset_samples(target_subfragment == "fwhF2-fwhR2n") %>%
+  subset_samples(pcr_primers == "fwhF2-fwhR2n") %>%
   filter_taxa( function(x) mean(x) > 0, TRUE) 
 
 tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
@@ -393,17 +359,19 @@ exp %>%
   geom_col(position="stack") + 
   scale_fill_brewer(palette="Spectral") +
   theme(legend.position = "bottom") +
+  base_theme+
   labs(x = "Sample Name", y= "Expected relative abundance")
 
 #Get obsered
 sam <- speedyseq::psmelt(ps_bias) %>%
   janitor::clean_names() %>%
-  mutate(taxon = species) %>%
-  filter(!str_detect(genus, "__")) %>%#Remove unclassified
-  dplyr::select(sample_name, taxon, abundance, target_subfragment, fcid, material_type = type) %>%
+  filter(!str_detect(species, "__")) %>%#Remove unclassified
+  mutate(taxon = species %>% str_replace(" ", "_")) %>%
+  dplyr::select(sample_name, taxon, abundance, pcr_primers, fcid, material_type = type) %>%
   mutate(sample_name = sample_name %>%
            str_remove_all("BF1-BR1-|SauronS878-HexCOIR4-|fwhF2-HexCOIR4-|fwhF2-fwhR2n-") %>%
-           str_remove("HLVKYDMXX_"),
+           str_remove("HLVKYDMXX_") %>%
+           str_remove("CB3DR_"),
          sample_id = paste0(fcid, "_", sample_name),
          sample_name = sample_name %>%
            str_remove("-ex[0-9]")) 
@@ -414,30 +382,78 @@ joint <- sam %>%
          sample_name %in% exp$sample_name) %>%
   left_join(exp, by = c("sample_name","taxon")) %>%
   dplyr::rename(observed = abundance) %>%
+  filter(!is.na(expected))%>%
   mutate(expected = replace_na(expected, 0),
          observed0 = (observed + 0.5) * (expected > 0),
-         error = observed0 / expected) %>%
+         error = observed0 / expected,
+        # error_centre = center_elts(observed0 / expected, na.rm = TRUE),
+         ) %>%
   distinct() %>%
   group_by(sample_id) %>%
   mutate(observed.prop=observed, expected.prop=expected) %>%
   mutate_at(vars(observed.prop,  expected.prop), ~ . / sum(.) ) %>% #Convert to proportions
-  ungroup()
+  mutate(sample_size = sum(expected), # Do the same for the ratios?
+         observed_abs = observed.prop * sample_size,
+         error_abs = observed_abs / expected, 
+         #error_abs_centre = center_elts(observed_abs / expected, na.rm = TRUE)
+         )  %>%
+  group_by(sample_id) %>%
+  group_modify(~{
+    alr_denom <- .x %>% 
+      filter(taxon == "Carpophilus_hemipterus") %>% # Set to consistent taxon across all
+      pull(error)
+    clr_denom <- .x %>%
+      pull(error) %>%
+      gm_mean()
+    .x %>%
+      mutate(error_alr = log(error / alr_denom),
+             error_clr = log(error / clr_denom))
+  }) 
+
 ```
 
 #Visualise errors
 
 ```{r visualise errors}
+# Original errors
+error_rmse <- joint %>%
+  group_by(material_type) %>%
+  rmse(truth = expected.prop, estimate = observed.prop) %>%
+  dplyr::select(RMSE = .estimate, material_type)
+
+error_anorm <- joint %>%
+  group_by(material_type) %>%
+    summarise(Adist = anorm(observed.prop / expected)) 
+
 ## Visualise errors in proportions
-joint %>% 
+gg.error_props <- joint %>% 
   filter(expected > 0) %>%
   mutate_at(vars(expected.prop, observed.prop), logit) %>%
-  ggplot(aes(expected.prop, observed.prop, color = taxon)) + 
+  left_join(error_rmse) %>%
+  left_join(error_anorm) %>%
+  ggplot(aes(expected.prop, observed.prop, fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
+  geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(material_type~.)+
+    coord_fixed() + 
+  theme_bw()+
+  labs(fill = "Taxon",
+       x="Expected proportions (log-odds)",
+       y="Observed proportions (log-odds)") 
+
+## Visualise errors in abs
+joint %>% 
+  filter(expected > 0) %>%
+  ggplot(aes(expected, observed_abs, color = taxon)) + 
   geom_abline(intercept = 0, slope=1) +
   geom_jitter(alpha=0.7) +
   scale_color_brewer(palette="Spectral")+
   facet_grid(material_type~fcid)+
   theme_bw()+
-  labs(title = "Observed vs. expected proportions (log-odds)",
+  labs(title = "Observed vs. expected absolute abundances",
        color = "Taxon",
        x="Expected",
        y="Observed") 
@@ -447,10 +463,11 @@ joint %>%
   filter(expected > 0) %>%
   dplyr::mutate(Taxon = taxon %>%
                   str_replace("^.+_", paste0(str_extract(taxon, "."), "_"))) %>% #Shorten genus names
-    compute_ratios(group_vars = c("sample_id", "fcid", "material_type")) %>%
-    filter(!is.na(expected)) %>%
-    mutate(pair = paste(Taxon.x, Taxon.y, sep = ":")) %>% 
-  ggplot(aes(pair, error, colour=sample_id)) +
+  compute_ratios(group_vars = c("sample_id", "fcid", "material_type")) %>%
+  filter(!is.na(expected)) %>%
+  filter(!Taxon.x == Taxon.y) %>%
+  mutate(pair = paste(Taxon.x, Taxon.y, sep = ":")) %>% 
+  ggplot(aes(pair, error, colour=Taxon.x)) +
   geom_jitter(alpha=0.7) +
   geom_hline(yintercept = 1) +
   scale_y_log10() +
@@ -463,107 +480,63 @@ joint %>%
 
 ```
 
-# Estimate bias
+# Compare bias models
+
 
 ## Split data into training and testing
-
 
 ```{r splits}
 set.seed(666)
 
 #Sample splits
 joint_split <- joint %>%
-  group_by(sample_id) %>%
-  summarise(ntaxa=n()) %>%
-  initial_split(strata=ntaxa)
+  ungroup() %>%
+  initial_split(strata=material_type)
 
-
+# Training set
 joint_train <- joint %>%
-  filter(sample_id %in% training(joint_split)$sample_id)
+  dplyr::select(-error) %>%
+  #dplyr::rename(error_rat = error) %>%
+  filter(sample_id %in% training(joint_split)$sample_id) %>%
+  ungroup()%>%
+  pivot_longer(starts_with("error"),
+               names_to="error_type",
+               values_to="error")
+
+# Testing set
 joint_test <- joint %>%
-  filter(sample_id %in% testing(joint_split)$sample_id)
+  dplyr::select(-error) %>%
+  #dplyr::rename(error_rat = error) %>%
+  filter(sample_id %in% testing(joint_split)$sample_id)%>%
+  ungroup()%>%
+  pivot_longer(starts_with("error"),
+               names_to="error_type",
+               values_to="error")
 
 table(joint_train$sample_id %in% joint_test$sample_id)
 table(joint_test$sample_id %in% joint_train$sample_id)
-```
 
-
-## Mean proportions
-
-Here we estimate bias as the arithmetic mean of the error in proportions
-
-NOTE: i wonder how this would look if i took the geometric rather than arithmetic mean?
-
-```{r mean proportions}
-# Compare these fits!  
-fit_prop <- joint_train %>%
-  filter(expected > 0) %>%
-  mutate(error = observed.prop / expected.prop) %>%
-  group_by(material_type, taxon) %>%
-  summarise(.pred = mean(error))
-
-#results
-prop_results_train <- joint_train %>%
-  left_join(fit_prop) %>%
- # dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
-  mutate(
-    predicted = expected * .pred, 
-    observed = observed.prop,
-    estimated = .pred
-  )%>%
-  group_by(sample_id) %>%
-  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
-
-prop_results_train %>%
-  group_by(material_type) %>%
-  rmse(truth = observed, estimate = predicted)
-
-prop_results_test <- joint_test %>%
-  left_join(fit_prop) %>%
-  #dplyr::select(material_type, sample_id, fcid, expected, observed.prop, .pred) %>%
-  mutate(
-    predicted = expected * .pred, 
-    observed = observed.prop
-  )%>%
-  dplyr::rename(estimated=.pred) %>%
-  group_by(sample_id) %>%
-  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)
-
-prop_results_test %>%
-  group_by(material_type) %>%
-  rmse(truth = observed, estimate = predicted)
+# Create Cross validation folds for model tuning
+train_cv <-  vfold_cv(joint_train, v = 5, strata = material_type )
 
 ```
 
-
-## Fitting models to proportions
-
-Here we estimate bias using a simple linear regression model, as well as a random forest regression of the expected and observerd proportions. 
-
-The model is fit seperately to each taxon and material type.
-
-The model is then evaluated seperately on the testing and training datasets
+## Simple LM on proportions
 
 ```{r simple lm}
-# LM
+# Specify LM
 lm_spec <- linear_reg() %>%
-  set_engine(engine = "lm")%>%
-        step_center(all_numeric()) %>%
-        step_scale(all_numeric()) %>%
-        step_dummy(all_nominal())
-
+  set_engine(engine = "lm")
 lm_spec
 
 fit_lm <- joint_train %>%
   filter(expected > 0) %>%
-  group_by(taxon, material_type) %>%
+  group_by(taxon, material_type, fcid) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
   filter(expected > 0) %>%
-  group_by(taxon, material_type) %>%
+  group_by(taxon, material_type, fcid) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
   mutate(lm_obj = map(train, ~fit(lm_spec, observed.prop ~ 0 + expected.prop, data = .)),
@@ -573,393 +546,673 @@ fit_lm <- joint_train %>%
     ) %>%
   unnest(coef_info)
 
-# RF
-rf_spec <- rand_forest(mode = "regression") %>%
-  set_engine("ranger") %>%
-        step_center(all_numeric()) %>%
-        step_scale(all_numeric()) %>%
-        step_dummy(all_nominal())
-rf_spec
-
-fit_rf <- joint_train %>%
-  filter(expected > 0) %>%
-  group_by(taxon, material_type) %>%
-  nest() %>%
-  dplyr::rename(train=data)%>%
-  left_join(joint_test %>%
-  filter(expected > 0) %>%
-  group_by(taxon, material_type) %>%
-  nest() %>%
-  dplyr::rename(test=data)) %>%
-  mutate(rf_obj = map(train, ~fit(rf_spec, observed.prop ~ 0 + expected.prop, data = .)),
-           pred_train = map2(rf_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(rf_obj, test, function(.model, .data) predict(.model, .data))
-    ) 
 
 #results train set
 lm_results_train <- fit_lm %>%
   unnest(pred_train, train) %>%
-  mutate(
-    observed = observed.prop,
-    model = "lm"
-  ) %>%
-  bind_rows(fit_rf %>%
-    unnest(pred_train, train) %>%
-    mutate(
-      observed = observed.prop,
-      model = "rf"
-    ))%>%
+  mutate(observed = observed.prop) %>%
   mutate(predicted = .pred)%>% 
     dplyr::select(!where(is.list))
 
 lm_results_train %>%
-  group_by(model, material_type) %>%
+  group_by(material_type) %>%
   rmse(truth = observed, estimate = predicted)
+
 
 # Results test set
 lm_results_test <- fit_lm %>%
   unnest(pred_test, test) %>%
-  mutate(
-    observed = observed.prop,
-    model = "lm"
-  ) %>%
-  bind_rows(fit_rf %>%
-    unnest(pred_test, test) %>%
-    mutate(
-      observed = observed.prop,
-      model = "rf"
-    )) %>%
+  mutate(observed = observed.prop) %>%
   mutate(predicted = .pred)%>% 
     dplyr::select(!where(is.list))
 
 lm_results_test %>%
-  group_by(model, material_type) %>%
+  group_by(material_type) %>%
   rmse(truth = observed, estimate = predicted)
-
-# Visualise
-lm_results_test %>%
-  mutate(train = "testing") %>%
-  bind_rows(lm_results_train %>%
-    mutate(train = "training")) %>%
-  ggplot(aes(logit(predicted), logit(observed), colour = model)) +
-  geom_abline(lty = 2, colour = "gray80", size = 1) +
-  base_theme+
-  geom_rangeframe(colour="black")+
-  geom_point(alpha = 0.5) +
-  facet_wrap(~train) +
-  theme(legend.position = "bottom")+
-  labs(
-    x = "logit(Predicted)",
-    y = "logit(Observed)",
-    colour = "Type of model"
-  )
 
 ```
 
-## Fitting models to compositional vectors
+## CompLM
+Estimating bias is complicated by the compositional nature of metabarcoding measurements. Because only relative abundances are measured, the measurement of a sample (s) only provides information about the efficiencies of the taxa in the sample relative to each other.
 
-Here we fit a simple linear model and random forest regression on the compositional difference between Observed and Expected counts. The compositional error vectors are first geometrically centered, then taxon is used as a predictor.
+Here we fit a simple linear model on the compositional difference between Observed and Expected counts. The compositional error vectors are first geometrically centered, then taxon is used as a predictor.
 
-```{R compositional regressions}
-fit_complm <- joint_train %>%
+```{r complm}
+bias_recipe <- 
+  recipe(formula = error ~ 0 + taxon + fcid + material_type, data = joint_train) %>% 
+  #step_string2factor(one_of(fcid, material_type)) %>% 
+  step_string2factor(fcid, material_type, taxon) %>% 
+  step_novel(all_nominal(), -all_outcomes()) %>% 
+  step_dummy(all_nominal(), -all_outcomes(), one_hot=TRUE) %>% 
+  step_zv(all_predictors()) #%>% 
+  #step_normalize(-all_nominal()) 
+
+lm_spec <- 
+  linear_reg() %>% 
+  set_mode("regression") %>% 
+  set_engine("lm")
+
+lm_workflow <- 
+  workflow() %>% 
+  add_recipe(bias_recipe) %>% 
+  add_model(lm_spec) 
+
+fit_compl <- joint_train %>%
   filter(expected > 0) %>%
-  group_by(material_type) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
   filter(expected > 0) %>%
-  group_by(material_type) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  mutate(lm_obj = map(train, ~fit(lm_spec, center_elts(observed0 / expected) ~ 0 + taxon, data = .)),
-           pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data)),
-           coef_info = map(lm_obj, tidy)
+  mutate(model_obj = purrr::map(train, ~fit(lm_workflow, data=.)),
+         pred_train = purrr::map2(model_obj, train, function(.model, .data) predict(.model, .data)),
+         pred_test = purrr::map2(model_obj, test, function(.model, .data) predict(.model, .data)),
     )
 
-# RF
-fit_comprf <- joint_train %>%
-  filter(expected > 0) %>%
-  group_by(material_type) %>%
-  nest() %>%
-  dplyr::rename(train=data)%>%
-  left_join(joint_test %>%
-  filter(expected > 0) %>%
-  group_by(material_type) %>%
-  nest() %>%
-  dplyr::rename(test=data)) %>%
-  mutate(rf_obj = map(train, ~fit(rf_spec, center_elts(observed0 / expected) ~ 0 + taxon, data = .)),
-           pred_train = map2(rf_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(rf_obj, test, function(.model, .data) predict(.model, .data))
-    ) 
-
 #results
-comp_results_train <- fit_complm %>%
+compl_results_train <- fit_compl %>%
   unnest(pred_train, train) %>%
-  mutate(
-    predicted = expected * .pred, 
-    observed = observed.prop,
-    estimated = .pred,
-    model = "lm"
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
   ) %>%
-  bind_rows(fit_comprf %>%
-    unnest(pred_train, train) %>%
-    mutate(
-      predicted = expected * .pred, 
-      observed = observed.prop,
-      estimated = .pred,
-      model = "rf"
-    )) %>%
-  group_by(sample_id, model) %>%
+  group_by(sample_id, error_type) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)%>% 
-    dplyr::select(!where(is.list))
+  ungroup() %>%
+  dplyr::filter(expected > 0)
 
-comp_results_train %>%
-  group_by(model, material_type) %>%
+compl_results_train %>%
+  group_by(error_type) %>%
   rmse(truth = observed, estimate = predicted)
 
 # Results test set
-comp_results_test <- fit_complm %>%
+compl_results_test <- fit_compl %>%
   unnest(pred_test, test) %>%
-  mutate(
-    predicted = expected * .pred, 
-    observed = observed.prop,
-    model = "lm"
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
   ) %>%
-  bind_rows(fit_comprf %>%
-    unnest(pred_test, test) %>%
-    mutate(
-      predicted = expected * .pred, 
-      observed = observed.prop,
-      model = "rf"
-    )) %>%
-  group_by(sample_id, model) %>%
+  group_by(sample_id, error_type) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)%>% 
-    dplyr::select(!where(is.list))
+  ungroup() %>%
+  dplyr::filter(expected > 0)
 
-comp_results_test %>%
-  group_by(model, material_type) %>%
+compl_results_test %>%
+  group_by(error_type) %>%
   rmse(truth = observed, estimate = predicted)
 
-# Visualise
-comp_results_test %>%
-  mutate(train = "testing") %>%
-  bind_rows(comp_results_train %>%
-    mutate(train = "training")) %>%
-  ggplot(aes(logit(predicted), logit(observed), colour = model)) +
-  geom_abline(lty = 2, colour = "gray80", size = 1) +
-  base_theme+
-  geom_rangeframe(colour="black")+
-  geom_point(alpha = 0.5) +
-  facet_wrap(~train) +
-  theme(legend.position = "bottom")+
-  labs(
-    x = "logit(Predicted)",
-    y = "logit(Observed)",
-    colour = "Type of model"
-  )
+compl_results_train %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(error_type~material_type)+
+  theme_bw()+
+  labs(fill = "Taxon",
+       x="Predicted proportions (log-odds)",
+       y="Observed proportions (log-odds)") 
 ```
 
-## Fitting models to CLR transformed vectors
 
-Here we fit a simple linear model and random forest regression to centred log ratio transformed error vectors, using taxon as the predictor
+## LASSO
 
-```{r clr}
-# Fit to 
-fit_clrlm <- joint_train %>%
-    filter(expected > 0) %>%
-  group_by(sample_id) %>%
-  mutate(clr_error = clr(observed0 /expected)) %>%
-  ungroup() %>%
-  group_by(material_type) %>%
+```{r LASSO}
+glmnet_spec <- 
+  linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet") %>%
+  set_args(family="gaussian")
+
+glmnet_workflow <- 
+  workflow() %>% 
+  add_recipe(bias_recipe) %>% 
+  add_model(glmnet_spec) 
+
+glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
+    0.2, 0.4, 0.6, 0.8, 1)) 
+
+glmnet_tune <- tune_grid(glmnet_workflow, resamples =train_cv, grid = glmnet_grid)
+autoplot(glmnet_tune , metric = "rmse") +
+  scale_x_log10()
+
+best_lambda <- glmnet_tune %>%
+  select_best("rmse")
+
+glmnet_workflow <- finalize_workflow(glmnet_workflow, best_lambda)
+
+fit_compglm <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
   filter(expected > 0) %>%
-  group_by(material_type) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  mutate(lm_obj = map(train, ~fit(lm_spec,clr_error ~ 0 + taxon, data = .)),
-           pred_train = map2(lm_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(lm_obj, test, function(.model, .data) predict(.model, .data)),
-           coef_info = map(lm_obj, tidy)
-    ) 
-
-# RF
-fit_clrrf <- joint_train  %>%
-  filter(expected > 0) %>%
-  group_by(sample_id) %>%
-  mutate(clr_error = clr(observed0 /expected)) %>%
-  ungroup() %>%
-  group_by(material_type) %>%
-  nest() %>%
-  dplyr::rename(train=data)%>%
-  left_join(joint_test %>%
-  filter(expected > 0) %>%
-  group_by(material_type) %>%
-  nest() %>%
-  dplyr::rename(test=data)) %>%
-  mutate(rf_obj = map(train, ~fit(rf_spec, clr_error ~ 0 + taxon, data = .)),
-           pred_train = map2(rf_obj, train, function(.model, .data) predict(.model, .data)),
-           pred_test = map2(rf_obj, test, function(.model, .data) predict(.model, .data))
-    ) 
+  mutate(model_obj = purrr::map(train, ~fit(glmnet_workflow, data=.)),
+         pred_train = purrr::map2(model_obj, train, function(.model, .data) predict(.model, .data)),
+         pred_test = purrr::map2(model_obj, test, function(.model, .data) predict(.model, .data)),
+    )
 
 #results
-clr_results_train <- fit_clrlm %>%
+compglm_results_train <- fit_compglm %>%
   unnest(pred_train, train) %>%
-  mutate(
-    predicted = expected * exp(.pred), 
-    observed = observed.prop,
-    estimated = exp(.pred),
-    model = "lm"
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
   ) %>%
-  bind_rows(fit_clrrf %>%
-    unnest(pred_train, train) %>%
-    mutate(
-      predicted = expected * exp(.pred), 
-      observed = observed.prop,
-      estimated = exp(.pred),
-      model = "rf"
-    )) %>%
-  group_by(sample_id, model) %>%
+  group_by(sample_id, error_type) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)%>% 
-    dplyr::select(!where(is.list))
+  ungroup() %>%
+  dplyr::filter(expected > 0)
 
-clr_results_train %>%
-  group_by(model, material_type) %>%
+compglm_results_train %>%
+  group_by(error_type) %>%
   rmse(truth = observed, estimate = predicted)
 
 # Results test set
-clr_results_test <- fit_clrlm %>%
-  unnest(pred_test, test) %>%
-  mutate(
-    predicted = expected * exp(.pred), 
-    observed = observed.prop,
-    model = "lm"
+compglm_results_test <- fit_compglm %>%
+  unnest(pred_test, test) %>% 
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
   ) %>%
-  bind_rows(fit_clrrf %>%
-    unnest(pred_test, test) %>%
-    mutate(
-      predicted = expected * exp(.pred), 
-      observed = observed.prop,
-      model = "rf"
-    )) %>%
-  group_by(sample_id, model) %>%
+  group_by(sample_id, error_type) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)%>% 
-    dplyr::select(!where(is.list))
+  ungroup() %>%
+  dplyr::filter(expected > 0)
 
-clr_results_test %>%
-  group_by(model, material_type) %>%
+compglm_results_test %>%
+  group_by(error_type) %>%
   rmse(truth = observed, estimate = predicted)
 
-# Visualise
-clr_results_test %>%
-  mutate(train = "testing") %>%
-  bind_rows(clr_results_train %>%
-    mutate(train = "training")) %>%
-  ggplot(aes(logit(predicted), logit(observed), colour = model)) +
-  geom_abline(lty = 2, colour = "gray80", size = 1) +
-  base_theme+
-  geom_rangeframe(colour="black")+
-  geom_point(alpha = 0.5) +
-  facet_wrap(~train) +
-  theme(legend.position = "bottom")+
-  labs(
-    x = "logit(Predicted)",
-    y = "logit(Observed)",
-    colour = "Type of model"
-  )
+compglm_results_train %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(error_type~material_type)+
+  theme_bw()+
+  labs(fill = "Taxon",
+       x="Predicted proportions (log-odds)",
+       y="Observed proportions (log-odds)") 
+```
+
+## Random Forest
+
+```{r RF}
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger") 
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(bias_recipe) %>% 
+  add_model(ranger_spec) 
+
+doParallel::registerDoParallel(cores=2)
+set.seed(666)
+ranger_tune <- tune_grid(ranger_workflow, resamples = train_cv, grid = 20)
+
+autoplot(ranger_tune , metric = "rmse") 
+
+best_rf <- ranger_tune %>%
+  select_best("rmse")
+
+ranger_workflow <- finalize_workflow(ranger_workflow, ranger_tune %>%
+  select_best("rmse"))
+
+fit_rf <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(model_obj = map(train, ~fit(ranger_workflow, data=.)),
+         pred_train = map2(model_obj, train, function(.model, .data) predict(.model, .data)),
+         pred_test = map2(model_obj, test, function(.model, .data) predict(.model, .data)),
+    )
+
+#results
+rf_results_train <- fit_rf %>%
+  unnest(pred_train, train) %>% 
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+rf_results_train %>%
+  group_by(error_type) %>%
+  rmse(truth = observed.prop, estimate = predicted)
+
+# Results test set
+rf_results_test <- fit_rf %>%
+  unnest(pred_test, test) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+rf_results_test %>%
+  group_by(error_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+rf_results_train %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(error_type~material_type)+
+  theme_bw()+
+  labs(fill = "Taxon",
+       x="Predicted proportions (log-odds)",
+       y="Observed proportions (log-odds)") 
 
 ```
 
+
+## XGBOOST
+
+```{r XGBOOST}
+xgboost_spec <- 
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+    loss_reduction = tune(), sample_size = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(bias_recipe) %>% 
+  add_model(xgboost_spec) 
+
+doParallel::registerDoParallel(cores=2)
+set.seed(666)
+xgboost_tune <-
+  tune_grid(xgboost_workflow, resamples = train_cv, grid =20)
+
+autoplot(xgboost_tune , metric = "rmse") 
+
+xgboost_workflow <- finalize_workflow(xgboost_workflow, xgboost_tune %>%
+  select_best("rmse"))
+
+fit_xg <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(model_obj = map(train, ~fit(xgboost_workflow, data=.)),
+         pred_train = map2(model_obj, train, function(.model, .data) predict(.model, .data)),
+         pred_test = map2(model_obj, test, function(.model, .data) predict(.model, .data)),
+    )
+
+#results
+xg_results_train <- fit_xg %>%
+  unnest(pred_train, train) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+xg_results_train %>%
+  group_by(error_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Results test set
+xg_results_test <- fit_xg %>%
+  unnest(pred_test, test) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+xg_results_test %>%
+  group_by(error_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+xg_results_train %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(error_type~material_type)+
+  theme_bw()+
+  labs(fill = "Taxon",
+       x="Predicted proportions (log-odds)",
+       y="Observed proportions (log-odds)") 
+```
+
+## Neural Network
+
+These models dont seem to be estimating taxon specific slopes??? maybe biased for some
+
+```{r Neural network}
+keras_spec <- 
+  linear_reg(mixture=tune(),penalty = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("keras",verbose = 0) 
+
+keras_workflow <- 
+  workflow() %>% 
+  add_recipe(bias_recipe) %>% 
+  add_model(keras_spec) 
+
+set.seed(666)
+keras_tune <-
+  tune_grid(keras_workflow, resamples = train_cv, grid =20)
+
+autoplot(keras_tune , metric = "rmse") 
+
+keras_workflow <- finalize_workflow(keras_workflow, keras_tune%>%
+  select_best("rmse"))
+
+fit_keras <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(model_obj = map(train, ~fit(keras_workflow, data=.)),
+         pred_train = map2(model_obj, train, function(.model, .data) predict(.model, .data)),
+         pred_test = map2(model_obj, test, function(.model, .data) predict(.model, .data)),
+    )
+
+#results
+keras_results_train <- fit_keras %>%
+  unnest(pred_train, train) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+keras_results_train %>%
+  group_by(material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+# Results test set
+keras_results_test <- fit_keras %>%
+  unnest(pred_test, test) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+keras_results_test %>%
+  group_by(material_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
+keras_results_train %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(error_type~material_type)+
+  theme_bw()+
+  labs(fill = "Taxon",
+       x="Predicted proportions (log-odds)",
+       y="Observed proportions (log-odds)") 
+```
 
 ## metacal
 
 Here we use the bias estimation approach of *McLaren, M. R., Willis, A. D., & Callahan, B. J. (2019). Consistent and correctable bias in metagenomic sequencing experiments. Elife, 8.* This approach treats the abundances and errors as compositional vectors and estimates the bias as the geometric center of these bias vectors. 
 
-This is a compositionally appropriate alternative to taking the arithmetic mean of errors in proportions as above.
 
 ```{r metacal}
-fit_metacal <- joint_train %>%
-    group_by(material_type) %>%
-    nest() %>%
-  dplyr::rename(train=data) %>%
-  left_join(joint_test %>%
-  filter(expected > 0) %>%
-  group_by(material_type) %>%
-  nest() %>%
-    dplyr::rename(test=data)) %>%
-    mutate(
-        fit = map(train, function(x){
-        err_mat <- x %>%
-          dplyr::select(sample_id, taxon, error) %>%
+# This is a modified version of the metacal::center function using the "proj" method
+# This has been modified to auto detect the input scale and work better with the tidymodels workflow
+# Original code from https://github.com/mikemc/metacal/blob/master/R/compositional-mean.R
+# Method from vandenBoogaart2006; also described in vandenBoogaart2013 and at
+# https://core.ac.uk/download/pdf/132548286.pdf (Bren2008)
+
+metacal_spec <- function(x, denom="all", in_scale = NULL, out_scale="linear"){
+  
+  #input checks
+  if(!is(x, "data.frame")){return(NULL)}    
+  if(!denom %in% c("all", unique(x$taxon))){
+    stop("denom must either be all, or a taxon name")
+  }
+  
+  #Transform x to matrix
+   mat <- x %>%
+          dplyr::select(sample_id, taxon, error)%>%
           pivot_wider(id_cols= sample_id,
                       names_from = "taxon",
                       values_from = "error",
-                      values_fill = list(error=NaN)) %>%
+                      values_fill = list(error=NaN))%>%    
           column_to_rownames("sample_id") %>%
           as.matrix() 
-        rows_to_keep <- rowSums(err_mat, na.rm=TRUE) > 0
-        cols_to_keep <- colSums(err_mat, na.rm=TRUE) > 0
-        err_mat <- err_mat[rows_to_keep, cols_to_keep]
-        #Fit different metacal centering methods
-        center(err_mat, method="proj", enframe=TRUE) %>%
-        magrittr::set_colnames(c("taxon", ".pred"))
-        })) %>%
-    unnest(fit) 
+    
+   # Check if matrix is log or linear
+   if(is.null(in_scale)){
+     curr_nas <- sum(is.na(mat))
+     new_nas <- sum(is.na(log(mat)))
+     if(curr_nas == new_nas){
+       in_scale <- "linear"
+       warning("No input scale provided, guessed ", in_scale)
+     } else if(!curr_nas == new_nas){
+       in_scale <- "log"
+       warning("No input scale provided, guessed ", in_scale)
+     }
+   }
 
-#results
-metacal_results_train <- joint_train %>%
-  left_join(fit_metacal) %>%
+  # Drop missing data
+  if (in_scale == "linear"){
+    rows_to_keep <- rowSums(mat, na.rm=TRUE) > 0
+    cols_to_keep <- colSums(mat, na.rm=TRUE) > 0
+    
+   } else  if(in_scale=="log"){
+    rows_to_keep <- rowSums(is.na(mat)) < ncol(mat)
+    cols_to_keep <- colSums(is.na(mat)) < nrow(mat)
+  }
+   mat <- mat[rows_to_keep, cols_to_keep]
+   
+   # Transform to log scale
+   if (in_scale == "linear"){
+      mat <- log(mat)
+   }
+    
+    # log center proj
+    K <- ncol(mat)
+    mat0 <- mat
+    mat0[is.nan(mat0)] <- 0
+    
+    P_sum <- diag(0, nrow = K)
+    v_sum <- rep(0, K)
+    weights = rep(1, nrow(mat))
+    
+    proj_mat <- function(K, M = c()) {
+      mat <- diag(nrow = K) - 1/(K - length(M))
+      mat[M,] <- 0
+      mat[,M] <- 0
+      mat
+    }
+    
+    for (i in seq(nrow(mat))) {
+        M <- which(is.nan(mat[i,]))
+        v <- mat0[i,]
+        P <- proj_mat(K, M) * weights[i]
+        P_sum <- P_sum + P
+        v_sum <- v_sum + P %*% v
+    }
+
+    #CLR transform
+    clr_center <- (MASS::ginv(P_sum) %*% v_sum) %>% c
+    names(clr_center) <- colnames(mat)
+    
+    out <- clr_center
+
+    if (!denom=="all"){
+      out <- out - mean(out[denom])
+    }
+    if (out_scale == "linear"){
+      out <- exp(out)
+    }
+    out <- tibble::enframe(out, "taxon", ".pred")    
+}
+
+## Tests to make sure that the pre transformed errors from earlier are equivalent
+## They should be because everything we are looking at is a ratio
+tests <- joint %>%
+  dplyr::rename(error_rat = error) %>%
+  filter(sample_id %in% training(joint_split)$sample_id) %>%
+  ungroup()%>%
+  pivot_longer(starts_with("error"),
+               names_to="error_type",
+               values_to="error") %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest()
+
+# Test that ALR on original errors is equivalent to the pre-transformed ALR error
+test1 <- metacal_spec(tests$data[[1]], denom="Carpophilus_hemipterus")
+test2 <- metacal_spec(tests$data[[5]], denom="Carpophilus_hemipterus")
+all(round(test1$.pred,4) == round(test2$.pred,4))
+
+
+#Test CLR on on original erorrs is equivalent to the pre-transformed CLR error
+test3 <- metacal_spec(tests$data[[1]])
+test4 <- metacal_spec(tests$data[[6]])
+all(round(test3$.pred,4) == round(test4$.pred,4))
+
+# Fit metacal
+fit_metacal <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(error_type, material_type, fcid) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+    filter(expected > 0) %>%
+  group_by(error_type, material_type, fcid) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  mutate(denom = case_when(
+    error_type == "error_alr"  ~ "Carpophilus_hemipterus",
+    TRUE ~ "all"
+  )) %>%
+   mutate(pred_train = purrr::map(train, metacal_spec,denom=denom),
+          pred_test = purrr::map(test, metacal_spec,denom=denom))
+
+# Results
+metacal_results_train <-  fit_metacal%>%
+  unnest(train) %>%
+  left_join(fit_metacal %>% 
+              unnest(pred_train) %>% 
+              dplyr::select(error_type, taxon, .pred))%>%
+  dplyr::filter(expected > 0) %>%
   mutate(
-    predicted = expected * .pred, 
-    observed = observed.prop,
-    estimated = .pred
-  )%>%
+      predicted = expected.prop * .pred,
+      estimated = .pred
+    )  %>%
   group_by(sample_id) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0) %>% 
+  dplyr::filter(expected > 0)%>% 
     dplyr::select(!where(is.list))
 
 metacal_results_train %>%
-  group_by(material_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  group_by(error_type) %>%
+  rmse(truth = observed.prop, estimate = predicted)
 
-metacal_results_test <- joint_test %>%
-  left_join(fit_metacal) %>%
+# Results test set
+metacal_results_test <- fit_metacal%>%
+  unnest(train) %>%
+  left_join(fit_metacal %>% 
+              unnest(pred_test) %>% 
+              dplyr::select(error_type, taxon, .pred)) %>%
+  dplyr::filter(expected > 0) %>%
   mutate(
-    predicted = expected * .pred, 
-    observed = observed.prop
-  )%>%
+      predicted = expected.prop * .pred,
+      estimated = .pred
+    )  %>%
   group_by(sample_id) %>%
   mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
   dplyr::filter(expected > 0)%>% 
     dplyr::select(!where(is.list))
 
 metacal_results_test %>%
-  group_by(material_type) %>%
-  rmse(truth = observed, estimate = predicted)
-
-# Visualise
-metacal_results_test %>%
-  mutate(train = "testing") %>%
-  bind_rows(metacal_results_train %>%
-    mutate(train = "training")) %>%
-  ggplot(aes(logit(predicted), logit(observed))) +
-  geom_abline(lty = 2, colour = "gray80", size = 1) +
-  base_theme+
-  geom_rangeframe(colour="black")+
-  geom_point(alpha = 0.5) +
-  facet_wrap(~train) +
-  theme(legend.position = "bottom")+
-  labs(
-    x = "logit(Predicted)",
-    y = "logit(Observed)"
-  )
+  group_by(error_type) %>%
+  rmse(truth = observed.prop, estimate = predicted)
 
 ```
 
@@ -970,56 +1223,120 @@ Here we compare the accuracy of the bias estimation procedure by looking at the 
 
 To determine the models predictive ability to new data, we also determine these metrics for a seperate testing set of samples that the model was not trained on.
 
-```{r evaluate models}
-all_fits_train <- do.call("list",                         mget(grep("results_train",names(.GlobalEnv),value=TRUE))) %>%
-  bind_rows(.id="model2") 
 
-all_fits_test <- do.call("list",                     mget(grep("results_test",names(.GlobalEnv),value=TRUE))) %>%
-  bind_rows(.id="model2") 
+Add Adist
+Add original bias?
+
+```{r evaluate models}
+all_fits_train <- do.call("list",mget(grep("results_train",names(.GlobalEnv),value=TRUE))) %>%
+  bind_rows(.id="model") 
+
+all_fits_test <- do.call("list",  mget(grep("results_test",names(.GlobalEnv),value=TRUE))) %>%
+  bind_rows(.id="model") 
 
 fits <- all_fits_train %>%
   mutate(train = "Training set") %>%
   bind_rows(all_fits_test %>%
     mutate(train = "Test set")) %>%
-  mutate(model2 = model2 %>%
+  mutate(model = model %>%
            str_remove("_results.*$") %>%
-           paste0(model) %>%
            str_remove("NA")) %>%
-  dplyr::select(model=model2, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop, observed, predicted, estimated, train, observed.prop) 
+  dplyr::select(model, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated, train, error_type ) 
 
+# Visualise fits of predicted proportions
 # Get RMSE
-error <- fits %>%
-  group_by(model, material_type, train) %>%
-  rmse(truth = observed, estimate = predicted) #could also do somethign  else here
+model_rmse <- fits %>%
+  group_by(model, error_type,  train) %>%
+  rmse(truth = observed.prop, estimate = predicted) %>%
+  dplyr::select(RMSE = .estimate, model, error_type, train)
 
-# plot rmse
-error %>%
-  ggplot(aes(x=model, y=.estimate, fill=model)) +
-  geom_col() +
-  base_theme+
-  geom_rangeframe() +
-  facet_grid(material_type~train) +
-  scale_fill_brewer(palette="Paired") +
-  theme(axis.text.x = element_text(angle=45, hjust = 1))
+model_anorm <- fits %>%
+  group_by(model, error_type, train) %>%
+    summarise(Adist = anorm(observed.prop / expected)) 
 
 # Visualise fits to data
-fits %>%
-  ggplot(aes(logit(predicted), logit(observed), colour = sample_id)) +
+gg.train_preds <- fits %>%
+  left_join(model_rmse) %>%
+  left_join(model_anorm) %>%
+  mutate(model = model %>%
+           str_replace("keras", "Neural Network") %>%
+           str_replace("rf", "Random Forest") %>%
+           str_replace("^lm$", "Linear Reg (Proportions)") %>%
+           str_replace("xg", "XGBOOST Tree") %>%
+           str_replace("^comp$", "Linear Reg (Ratios)") %>%
+           str_replace("compglm", "LASSO Reg (Ratios)")%>%
+           str_replace("compl", "Linear Reg (Ratios)")) %>%
+  filter(train == "Training set", error_type == "error_clr") %>%
+  mutate(model = factor(model),
+         model = fct_reorder(model, -RMSE)) %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = material_type)) +
+  geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-  base_theme+
-  geom_rangeframe(colour="black")+
-  geom_point(alpha = 0.5) +
+    geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   coord_fixed() + 
-  facet_grid(train~model) +
-  #theme(legend.position = "bottom")+
-  labs(x = "log-odds(Predicted proportion)", 
-    y = "log-odds(Observed proportion)",
-    colour = "Sample",
-    title="Bias model fits") 
+  facet_grid(material_type~model) +
+    base_theme+
+  scale_fill_brewer(palette="Set1") +
+  theme(panel.grid = element_line(size = rel(1)),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = "bottom",
+        legend.text = element_text(face="italic")) +
+    labs(x = "Bias model prediction (log-odds)", 
+        y = "Observed proportions (log-odds)",
+        fill = "Taxon", 
+        colour= NULL,
+        title= "Training set")
 
+gg.train_preds
+
+# Visualise fits to data
+gg.test_preds <- fits %>%
+  left_join(model_rmse) %>%
+  left_join(model_anorm) %>%
+  mutate(model = model %>%
+           str_replace("keras", "Neural Network") %>%
+           str_replace("rf", "Random Forest") %>%
+           str_replace("^lm$", "Linear Reg (Proportions)") %>%
+           str_replace("xg", "XGBOOST Tree") %>%
+           str_replace("^comp$", "Linear Reg (Ratios)") %>%
+           str_replace("compglm", "LASSO Reg (Ratios)")%>%
+           str_replace("compl", "Linear Reg (Ratios)")) %>%
+  filter(train == "Test set") %>%
+  mutate(model = factor(model),
+         model = fct_reorder(model, -RMSE)) %>%
+  ggplot(aes(logit(predicted), logit(observed.prop), fill = material_type)) +
+  geom_point(alpha = 0.5, shape=21, colour="black") +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+    geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  coord_fixed() + 
+  facet_grid(error_type~model) +
+    base_theme+
+  scale_fill_brewer(palette="Set1") +
+  theme(panel.grid = element_line(size = rel(1)),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = "bottom",
+        legend.text = element_text(face="italic")) +
+    labs(x = "Bias model prediction (log-odds)", 
+        y = "Observed proportions (log-odds)",
+        fill = "Taxon", 
+        colour= NULL,
+        title= "Testing set")
+
+gg.test_preds
+
+
+#Save figure
+#pdf(file="fig/bias_preds.pdf", width = 11, height = 8 , paper="a4r")
+#  plot(gg.bias_preds)
+#try(dev.off(), silent=TRUE)
+#
 ```
 
-## How well do the estimated bias recover the true composition
+## How well do the estimated bias recover the Relative abundances
 
 The opposite side of the coin to the above comparison is determining how well the estimated bias from each model can be used to calibrate the sequenced samples and thus recover the true composition.
 
@@ -1027,16 +1344,15 @@ The opposite side of the coin to the above comparison is determining how well th
 cal <- fits %>%
     ungroup() %>%
     dplyr::mutate(calibrated = observed.prop / estimated) %>%
-    group_by(sample_id, model) %>%
+    group_by(sample_id, model, train) %>%
     mutate_at(vars(calibrated), ~ . / sum(., na.rm=TRUE) )  %>%
     ungroup() 
-
 
 ggplot(cal, aes(x=taxon, y= odds(calibrated) / odds(expected.prop))) +
     geom_hline(yintercept=1, alpha=0.8)+
   geom_jitter(aes(x=taxon, y= odds(observed.prop) / odds(expected.prop)), colour="grey80", alpha=0.7, width = 0.1, height = 0)+
     geom_jitter(aes(colour = taxon),alpha=0.7, width = 0.1, height = 0) +
-    geom_rangeframe(color = "black") + 
+    #geom_rangeframe(color = "black") + 
     scale_y_log10() + 
     base_theme+
     scale_colour_brewer(palette = "Spectral") +
@@ -1052,13 +1368,17 @@ ggplot(cal, aes(x=taxon, y= odds(calibrated) / odds(expected.prop))) +
 
 ```
 
-# NExt:
 
-Bootstrap errors
+## How well do the estimated bias recover the true absolute abundances
+
+
+# Fit final model with boostrapping
+
+
+# Look at variable importance
+
 
 Reduction in errors as function of samples used to estiamte?
-
-
 
 
 # Old metacal analyis
@@ -1066,7 +1386,7 @@ Reduction in errors as function of samples used to estiamte?
 
 #Get predictions and SE
 bias.metacal <- joint %>%
-    left_join(bias, by = c("target_subfragment", "material_type", "taxon")) %>%
+    left_join(bias, by = c("pcr_primers", "material_type", "taxon")) %>%
     mutate(
         res_proj = error / est_proj,
         res_gm = error / est_gm,
@@ -1076,14 +1396,14 @@ bias.metacal <- joint %>%
         pred_rss = expected * est_rss
     ) %>%
   left_join(bootreps %>%
-    group_by(target_subfragment, material_type, taxon) %>%
+    group_by(pcr_primers, material_type, taxon) %>%
     summarise(gm_mean = gm_mean(bias), gm_se = gm_sd(bias)) %>%
-    ungroup, by = c("target_subfragment", "material_type", "taxon") )
+    ungroup, by = c("pcr_primers", "material_type", "taxon") )
 
 
 #Bootstrapped estimate of bias
 bootreps <- joint_train %>%
-  dplyr::group_by(target_subfragment, material_type) %>%
+  dplyr::group_by(pcr_primers, material_type) %>%
     nest() %>%
     mutate(
         bootreps = map(data, function(x){
@@ -1110,7 +1430,7 @@ bootreps <- joint_train %>%
 
 #Get predictions and SE
 bias.metacal <- joint %>%
-    left_join(bias, by = c("target_subfragment", "material_type", "taxon")) %>%
+    left_join(bias, by = c("pcr_primers", "material_type", "taxon")) %>%
     mutate(
         res_proj = error / est_proj,
         res_gm = error / est_gm,
@@ -1120,16 +1440,16 @@ bias.metacal <- joint %>%
         pred_rss = expected * est_rss
     ) %>%
   left_join(bootreps %>%
-    group_by(target_subfragment, material_type, taxon) %>%
+    group_by(pcr_primers, material_type, taxon) %>%
     summarise(gm_mean = gm_mean(bias), gm_se = gm_sd(bias)) %>%
-    ungroup, by = c("target_subfragment", "material_type", "taxon") )
+    ungroup, by = c("pcr_primers", "material_type", "taxon") )
 
 # Plot bootstraps
 library(ggridges)
 gg.boot <- ggplot(bootreps, aes(x = bias-1, y = taxon, fill=taxon)) +
     geom_density_ridges(scale = 4) + 
     geom_vline(xintercept = 0, color = "grey80", size=1) +
-  facet_grid(material_type~target_subfragment) +
+  facet_grid(material_type~pcr_primers) +
   scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
   scale_x_continuous(expand = c(0, 0), limits=c(-1, 4)) + 
   scale_fill_brewer(palette = "Spectral") + 
@@ -1141,7 +1461,7 @@ gg.boot
 
 ## Calculate SE as control samples increase - just do for the highest number group
 err_mat <- joint %>%
-    filter(target_subfragment == "fwhF2-fwhR2n", material_type == "CarpMock") %>%
+    filter(pcr_primers == "fwhF2-fwhR2n", material_type == "CarpMock") %>%
           dplyr::select(sample_id, taxon, error) %>%
           pivot_wider(id_cols= sample_id,
                       names_from = "taxon",
@@ -1190,7 +1510,7 @@ lm_dat <- joint %>%
   mutate(clr_observed = clr(observed0),
          clr_expected = clr(expected)) %>%
   ungroup() %>%
-  group_by(taxon, target_subfragment, material_type)
+  group_by(taxon, pcr_primers, material_type)
 
 group_name <- group_keys(lm_dat) %>%
   unite(col="name", everything(), sep=";") %>%
@@ -1227,7 +1547,7 @@ boot_coefs <- boot_models %>%
       unnest(coef_info)
   }) %>%
   bind_rows(.id="name") %>%
-  tidyr::separate(name, into=c("taxon", "target_subfragment", "material_type"), sep=";")
+  tidyr::separate(name, into=c("taxon", "pcr_primers", "material_type"), sep=";")
 
 
 # Calculate CIs using percentile method
@@ -1237,13 +1557,13 @@ bias.lmboot <- boot_models %>%
               int_pctl(x, coef_lm) %>% mutate(model = "lmboot"))
               }) %>%
   bind_rows(.id="name") %>%
-  tidyr::separate(name, into=c("taxon", "target_subfragment", "material_type"), sep=";") %>%
+  tidyr::separate(name, into=c("taxon", "pcr_primers", "material_type"), sep=";") %>%
   mutate(se = (.upper - .lower) / 3.92)  #3,92 for 95% CIs
 
 bias.lmboot 
 ggplot(boot_coefs, aes(x=estimate, fill=taxon, group=taxon)) +
   geom_histogram(binwidth = 0.1, alpha=0.5) +
-  facet_grid(target_subfragment ~ material_type, scales = "free") +
+  facet_grid(pcr_primers ~ material_type, scales = "free") +
   #geom_vline(aes(xintercept = .estimate), data = bias.lmboot, col = "red") +
   #geom_vline(aes(xintercept = .lower), data = bias.lmboot, col = "blue") +
   #geom_vline(aes(xintercept = .upper), data = bias.lmboot, col = "blue") +
@@ -1261,87 +1581,20 @@ boot_aug <- boot_models %>%
       unnest(augmented)
     }) %>%
   bind_rows(.id="name") %>%
-  tidyr::separate(name, into=c("taxon", "target_subfragment", "material_type" ), sep=";") 
+  tidyr::separate(name, into=c("taxon", "pcr_primers", "material_type" ), sep=";") 
 
 ggplot(boot_aug %>% filter(model == "aug_lm"), aes(x=expected, y=observed, colour=taxon)) +
   geom_line(aes(y = .fitted, group = id), alpha = .2) +
   geom_point() +
   #geom_line(data=bias.clrboot, aes(y=.estimate),col= "black", inherit.aes = FALSE) +
-  facet_grid(target_subfragment ~taxon, scales = "free") +
+  facet_grid(pcr_primers ~taxon, scales = "free") +
   theme(legend.position = "none")
 
 ggplot(boot_aug %>% filter(model == "aug_clr"), aes(x=clr_expected, y=clr_observed, colour=taxon)) +
   geom_line(aes(y = .fitted, group = id), alpha = .2) +
   geom_point() +
   #geom_line(data=bias.clrboot, aes(y=.estimate),col= "black", inherit.aes = FALSE) +
-  facet_grid(target_subfragment ~taxon, scales = "free") +
+  facet_grid(pcr_primers ~taxon, scales = "free") +
   theme(legend.position = "none")
 
 ```
-
-## Compositional linear regression
-
-really need to understand how mike mclaren formulates his generalised bias regression model from :
-https://mikemc.github.io/presentations/lab-meetings/20191004/Rmd/slides.html#15
-
-Is he just doing a log ratio regression on the errors?
-
-ie lm(Error ~ 0 + expected, data = .)
-
-```{r compositional regression}
-# Example log ratio regression from https://www.r-bloggers.com/logratio-regression-a-simple-way-to-model-compositional-data/
-
-data(ArcticLake)
-df <- as.data.frame(ArcticLake)
-#With the D-dimension outcome [p_1, p_2…p_D], we can derive a [D-1]-dimension outcome [log(p_2 / p_1)…log(p_D / p_1)] and then estimate a multivariate regression based on the new outcome.
-
-#This is taking the log ratio (ALR) to sand first - to CLR this would take the ratio against rowmean?
-lm(cbind(log(silt / sand), log(clay / sand)) ~ depth, data = df)
-
-#see what the model matrix looks like
-model.matrix(cbind(log(silt / sand), log(clay / sand)) ~ depth, data = df)
-
-model.matrix(cbind(silt, clay) ~ depth, data = df)
-
-#Since log(x / y) = log(x) – log(y), we can also estimate the model with log(sand) as an offset term.
-lm(cbind(log(silt), log(clay)) ~ depth + offset(log(sand)), data = df)
-
-model.matrix(cbind(log(silt), log(clay)) ~ depth + offset(log(sand)), data = df)
-#Alternatively, we can also use the comp.reg function in the Compositional package.
-Compositional::comp.reg(as.matrix(df[, 1:3]), df[, 4])
-
-# Test using offset
-complm <- joint %>%
-  filter(expected > 0) %>%
-  #dplyr::select(sample_id, taxon, observed0)
-  group_by(material_type, target_subfragment)  %>%
-    nest() %>%
-    mutate(fit = map(data, ~lm(log(error) ~ 0 + taxon, data = .))
-    ) 
-
-%>%
-  pivot_longer(c("fit_clr","fit_lm"), 
-               names_to="model",
-               values_to = "fit") %>%
-  mutate(tidied = map(fit, broom::tidy),
-         aug = map(fit, broom::augment)) %>%
-  unnest(tidied, aug, data) %>%
-  dplyr::select(taxon, target_subfragment, material_type, sample_name, model, estimate, std.error, clr_observed, expected, .fitted) 
-
-
-complm <- joint %>%
-  filter(expected > 0) %>%
-  #dplyr::select(sample_id, taxon, observed0)
-  group_by(material_type, target_subfragment)  %>%
-  nest() %>%
-  mutate(matrix = map(data, function(x){
-    x %>%
-      pivot_wider(id_cols= sample_id,
-                      names_from = "taxon",
-                      values_from = "observed0") %>%
-      column_to_rownames("sample_id") %>%
-      as.matrix} ))
-
-```
-
-

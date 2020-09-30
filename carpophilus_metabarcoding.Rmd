@@ -12,8 +12,7 @@ editor_options:
 
 library(knitr)
 knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.show = "hold", fig.keep = "all")
-opts_knit$set(root.dir = 'C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding')
-setwd('C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/Dros_metabarcoding')
+opts_knit$set(root.dir = 'C:/Users/ap0y/Dropbox/workprojects/PHD/Metabarcoding/carpophilus_metabarcoding/')
 opts_chunk$set(dev = 'png')
 ```
 
@@ -86,7 +85,7 @@ library(metacal)
 
 #devtools::install_github("benjjneb/dada2")
 
-source("scripts/helper_functions.R")
+#source("scripts/helper_functions.R")
 
 ```
 
@@ -1277,6 +1276,9 @@ data.0 <- zCompositions::cmultRepl(t(subset(x.filt, select=-c(taxonomy))), label
 #data.0 <- t(subset(x.filt, select=-c(taxonomy)))
 #Conduct CLR - Could try doing rowmeans of the spike ins instead?
 x.clr <- as.matrix(log(data.0) - rowMeans(log(data.0)))
+
+#ALR
+#x.alr <- as.matrix(log(data.0) - mean(log(data.0[6,])))
 
 #Conduct variance filtering
 var.clr <- matrixStats::colVars(x.clr)
