@@ -616,9 +616,12 @@ prop_recipe <-
   step_zv(all_predictors()) 
 
 prop_recipe_separate <- 
-  recipe(formula = observed.prop ~ 0 + expected.prop , data = joint_train) %>% 
-  step_zv(all_predictors())
-
+  recipe(formula = observed.prop ~ 0 + expected.prop + taxon , data = joint_train) %>% 
+  #step_string2factor(one_of(fcid, material_type)) %>% 
+  step_string2factor(taxon) %>% 
+  step_novel(all_nominal(), -all_outcomes()) %>% 
+  step_dummy(all_nominal(), -all_outcomes(), one_hot=TRUE) %>% 
+  step_zv(all_predictors()) 
 
 ```
 
@@ -633,18 +636,62 @@ lm_spec
 
 fit_lm <- joint_train %>%
   filter(expected > 0) %>%
-  group_by(taxon, material_type, fcid) %>%
+  group_by(material_type, fcid) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
   filter(expected > 0) %>%
-  group_by(taxon, material_type, fcid) %>%
+  group_by(material_type, fcid) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  mutate(model_obj = map(train, ~fit(lm_spec, observed.prop ~ 0 + expected.prop, data = .)),
-         #pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+  mutate(model_obj = map(train, ~fit(lm_spec, expected.prop ~ 0 + observed.prop + taxon, data = .)),
+         pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+         pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
          coef_info = purrr::map(model_obj, tidy)
     ) 
+#results
+lm_results_train <- fit_lm %>%
+  unnest(pred_train, train) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  calibrated = observed.prop / estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0) %>%
+  mutate(residuals = expected.prop / calibrated)
+
+lm_results_train %>%
+  group_by(material_type) %>%
+  rmse(truth = observed.prop, estimate = predicted)
+
+# Results test set
+lm_results_test <- fit_complm %>%
+  unnest(pred_test, test) %>%
+  dplyr::select(!where(is.list))%>%
+  mutate(estimated = case_when(
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    TRUE ~ .pred
+  ),
+  predicted = expected.prop * estimated, 
+  calibrated = observed.prop / estimated, 
+  observed = observed.prop
+  ) %>%
+  group_by(sample_id, error_type) %>%
+  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  ungroup() %>%
+  dplyr::filter(expected > 0)
+
+lm_results_test %>%
+  group_by(error_type) %>%
+  rmse(truth = observed, estimate = predicted)
+
 
 # Move the method of using coefficients from proportions to the other model types as well
 
@@ -714,7 +761,7 @@ lm_workflow_prop <-
   add_recipe(prop_recipe_separate) %>% 
   add_model(lm_spec)
 
-# Fit model to ratios
+# Fit model to ratios and proportions
 fit_complm <- joint_train %>%
   filter(expected > 0) %>%
   group_by(error_type, fcid, material_type) %>%
@@ -733,14 +780,15 @@ fit_complm <- joint_train %>%
       if (!y =="error_prop"){
         fit(lm_workflow_rat, data=x)
       } else if(error_type == "error_prop"){
-               x %>%
-         group_by(taxon) %>%
-         nest() %>%
-         mutate(model_obj = purrr::map(data, ~fit(lm_workflow_prop, data=.)),
-                coef_info = purrr::map(model_obj, ~broom::tidy(.x))) %>%
-         unnest(coef_info) %>%
-         filter(term =="expected.prop") %>%
-         dplyr::select(taxon, estimate)
+        model_fit <- fit(lm_workflow_prop, data=x)
+        # predict a fake table with all values at 1 to get taxon correction factors
+        crossing(taxon = unique(x$taxon),
+                           fcid = unique(x$fcid),
+                           material_type = unique(x$material_type))%>%
+          mutate(expected.prop = 1) %>%
+          bind_cols(safe_predict(model_fit, new_df)) %>%
+          dplyr::select(-expected.prop)%>%
+          dplyr::select(taxon, .pred)
       }
     }),
     pred_train = purrr::map2(model_obj, train, function(x,y ){
@@ -753,8 +801,7 @@ fit_complm <- joint_train %>%
       }else if( is(x, "data.frame")){ 
         # predict 
       y %>%
-        left_join(x)%>%
-          dplyr::select(.pred = estimate)
+        left_join(x)
       }
     }),
     pred_test = purrr::map2(model_obj, test, function(x,y ){
@@ -767,8 +814,7 @@ fit_complm <- joint_train %>%
       }else if( is(x, "data.frame")){ 
         # predict 
       y %>%
-        left_join(x)%>%
-          dplyr::select(.pred = estimate)
+        left_join(x)
       }
     }),
     vip = purrr::map2(model_obj, group_names,~{
@@ -805,7 +851,8 @@ complm_results_train <- fit_complm %>%
   group_by(sample_id, error_type) %>%
   mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
-  dplyr::filter(expected > 0)
+  dplyr::filter(expected > 0) %>%
+  mutate(residuals = expected.prop / calibrated)
 
 complm_results_train %>%
   group_by(error_type) %>%
@@ -854,7 +901,8 @@ glmnet_spec <-
     set_engine("glmnet") %>%
     set_args(family="gaussian")
   
-glmnet_workflow <- 
+# Tune ratio workflow
+glmnet_workflow_rat <- 
     workflow() %>% 
     add_recipe(bias_recipe_separate) %>% 
     add_model(glmnet_spec) 
@@ -862,18 +910,17 @@ glmnet_workflow <-
 glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
     0.2, 0.4, 0.6, 0.8, 1)) 
 
-glmnet_tune <- tune_grid(glmnet_workflow, resamples = train_cv, grid = glmnet_grid)
+glmnet_tune <- tune_grid(glmnet_workflow_rat, resamples = train_cv, grid = glmnet_grid)
 
  autoplot(glmnet_tune , metric = "rmse") +
   scale_x_log10()
 
-best_lambda <- glmnet_tune %>%
-  select_best("rmse")
-
-glmnet_workflow <- finalize_workflow(glmnet_workflow, best_lambda)
+glmnet_workflow_rat <- finalize_workflow(glmnet_workflow_rat, glmnet_tune %>%
+  select_best("rmse"))
 
 fit_compglm <- joint_train %>%
   filter(expected > 0) %>%
+  filter(!error_type=="error_prop") %>%
   group_by(error_type, fcid, material_type) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
@@ -894,6 +941,14 @@ fit_compglm <- joint_train %>%
              labs(title=.y %>% str_remove("error_"))
          })
     )
+
+
+
+ # Plot model variable importance
+wrap_plots(fit_complm %>%
+             filter(!error_type=="error_prop") %>%
+             pull(vip))
+
 
 # Plot model variable importance
 wrap_plots(fit_compglm$vip)
