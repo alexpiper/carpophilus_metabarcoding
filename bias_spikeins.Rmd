@@ -1,0 +1,586 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+## Make Phyloseq object
+
+Following taxonomic assignment, the sequence table and taxonomic table are merged into a single phyloseq object alongside the sample info csv.
+
+We then make a plot to evaluate the effectiveness of taxonomic assignment to each rank
+
+```{r create PS, eval = FALSE}
+seqtab.nochim <- read_rds("output/rds/seqtab_final.rds")
+
+##Fix seqtab names -removing read name, sample number etc
+rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
+ str_split_fixed("_",n=Inf) %>%
+   as_tibble() %>% 
+ separate(V7, into="rep", sep = "\\.", extra = "drop") %>%
+ unite(col=SampleID, c("V2","rep"),sep="-") %>%
+ pull(SampleID) %>%
+ str_replace(pattern="Rep", replacement="rep")
+
+#### Rename problematic samples
+rownames(seqtab.nochim)  <- rownames(seqtab.nochim) %>%
+  str_replace_all("CM9", "CM8")%>%
+  str_replace_all("CM10", "CM9")%>%
+  str_replace_all("CM11", "CM10")%>%
+  str_replace_all("CML1", "CM11")%>%
+  str_replace_all("CML2", "CML1")%>%
+  str_replace_all("CML3", "CML2")%>%
+  str_replace_all("CML4", "CML3")%>%
+  str_replace_all("CML5", "CML4")%>%
+  str_replace_all("CML6", "CML5")%>%
+  str_replace_all("CT1", "CML6")%>%
+  str_replace_all("CT2", "CT1")%>%
+  #str_replace_all("CT3", "CT2")%>%
+  #str_replace_all("CT4", "CT3")%>%
+  str_replace_all("CT5", "CT11")%>% # NEED TO CHECK THIS
+  str_replace_all("CT5dup", "CT5")
+
+#NEED TO FIX SAMPLE LABELLINg
+
+
+#Run 1 
+rownames(seqtab.nochim) <- rownames(seqtab.nochim) %>% 
+  str_split_fixed("_",n=Inf) %>%
+    as_tibble() %>% 
+  pull(V1)
+
+tax_plus <- read_rds("output/rds/tax_IdTaxaExact.rds") 
+
+#Load sample information
+## ---- samdat ----
+samdf <- read.csv("sample_data/Sample_info2.csv", header=TRUE) %>%
+  filter(!duplicated(sample_id)) %>%
+  filter(FCID== "HLVKYDMXX") %>% # change for other runs
+  magrittr::set_rownames(.$sample_id) %>%
+  dplyr::select(c("sample_id", "ExtractID",
+                  "geo_loc_name", "material", "treatment", "material", "collection_date",
+                  "target_subfragment", "F_primer", "R_primer",
+                  "FCID", "seq_platform_ID"))
+#Display samDF
+head(samdf)
+
+## ---- phyloseq ----
+ps <- phyloseq(tax_table(tax_plus), sample_data(samdf),
+               otu_table(seqtab.nochim, taxa_are_rows = FALSE))
+
+if(nrow(seqtab.nochim) > nrow(sample_data(ps))){warning("Warning: All samples not included in phyloseq object, check sample names match the sample metadata")}
+
+rownames(samdf)[which(!rownames(sample_data(ps))  %in% rownames(samdf))]
+
+## Subset to carpophilus
+
+#Rename synthetic orders
+tax_table(ps)[,2][which(str_detect(tax_table(ps)[,7], "Synthetic"))] <- "Arthropoda"
+
+ps <- ps %>%
+  subset_samples(material %in% c("Carpophilus Adults","Carpophilus Larvae")) %>%
+  subset_taxa(Phylum == "Arthropoda") %>%
+  filter_taxa( function(x) mean(x) > 0, TRUE) 
+
+rm_samples <- "CT11|CM7|CT3"
+ps <- subset_samples(ps, !str_detect(sample_names(ps), rm_samples)) # Drop Undetermined reads
+
+```
+
+
+## Process replicates 
+
+
+```{r replicates}
+
+# Merge replicates
+  ps.merged <- ps %>%
+    merge_samples(group = "ExtractID")
+
+#This loses the sample metadata - Need to add it agian
+samdf <- read.csv("sample_data/Sample_info2.csv", header=TRUE)  %>%
+  filter(!duplicated(ExtractID))  %>%
+  magrittr::set_rownames(.$ExtractID) %>%
+  dplyr::select(c("sample_id", "ExtractID",
+                  "geo_loc_name", "material", "treatment",  "collection_date",
+                  "target_subfragment", "F_primer", "R_primer",
+                  "FCID", "seq_platform_ID"))
+
+sample_data(ps.merged) <- samdf
+ps.merged <- filter_taxa(ps.merged, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
+
+```
+
+
+# Analyse spike ins for run 3
+```{r analyse spike ins}
+library(plotly)
+library(patchwork)
+
+#Remove blanks
+rm_samples <- sample_names(ps.merged)[which(str_detect(sample_names(ps.merged),"BLANK"))]
+ps1 <- subset_samples(ps.merged, !sample_names(ps.merged) %in% rm_samples) # Drop Undetermined reads
+ps1 <- prune_samples(sample_sums(ps1)>=20, ps1) # Drop empty samples
+
+#Replace experimental factor column with spikeins name to allow faceting by
+spikeins <- c("DL1","DL2","DL3","DL4","DL5","DL6","CL1","CL2","CL3","CL4","CL5","CL6")
+
+sample_data(ps1)$experimental_factor <- as.character(sample_data(ps1)$experimental_factor)
+
+for (i in 1:length(spikeins)){
+  sample_data(ps1)$experimental_factor[which(str_detect(sample_data(ps1)$ExtractID,spikeins[i]))] <- spikeins[i]
+}
+
+#Add dataset column
+sample_data(ps1) <- data.frame(sample_data(ps1)) %>%
+  mutate(dataset = str_replace(experimental_factor,pattern=".$",replacement=""))%>%
+  set_rownames(.$ExtractID)
+
+psprop <- transform_sample_counts(ps1, fun = proportions,na_rm=FALSE) # Breaking agglomeration
+
+
+#only highlight syn & others
+tax.other <- data.frame(tax_table(psprop))
+for (i in 1:7){ tax.other[,i] <- as.character(tax.other[,i])}
+tax.other$Kingdom[which(str_detect(tax.other$Species,"_Synthetic"))] <- "Synthetic"
+tax.other$Kingdom[which(!str_detect(tax.other$Species,"_Synthetic"))] <- "Other"
+tax_table(psprop) <- as.matrix(tax.other)
+
+gg.bardros <- plot_bar(subset_samples(psprop,dataset=="DL"), fill="Kingdom") +facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  scale_fill_manual(values=c("#ef8a62","#67a9cf")) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+gg.barcarp <- plot_bar(subset_samples(psprop,dataset=="CL"), fill="Kingdom") +facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  scale_fill_manual(values=c("#ef8a62","#67a9cf")) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+gg.bardros / gg.barcarp
+
+#add extra column to refer to this, str_detect the spike in name ie DL1, CL1 etch
+
+#then plot that similar heatmap of detection of the spike ins
+#could we do this with a summarise taxa call then subset to synthetics only?
+
+test <- summarize_taxa(psprop, "Species", "ExtractID") %>%
+  dplyr::filter(str_detect(Species,"_Synthetic")) %>%
+  dplyr::filter(!str_detect(ExtractID,"BLANK")) %>%
+  mutate(experimental_factor="O") 
+
+spikeins <- c("DL1","DL2","DL3","DL4","DL5","DL6","CL1","CL2","CL3","CL4","CL5","CL6")
+
+for (i in 1:length(spikeins)){
+  test$experimental_factor[which(str_detect(test$ExtractID,spikeins[i]))] <- spikeins[i]
+}
+
+#add dataset column by removing last character of experimental factor
+test <- test %>%
+  mutate(dataset = str_replace(experimental_factor,pattern=".$",replacement=""))
+
+gg.spikedros <- ggplot(test %>% filter(dataset=="DL"),aes(x=ExtractID,y=Species,fill=totalRA)) + 
+  geom_tile()  +
+  scale_fill_viridis() + 
+  facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=90))
+
+gg.spikecarp <- ggplot(test %>% filter(dataset=="CL"),aes(x=ExtractID,y=Species,fill=totalRA)) + 
+  geom_tile() +
+  theme(axis.text.x = element_text(angle=90)) +
+  scale_fill_viridis() + 
+  facet_grid(dataset~experimental_factor,scales="free",drop=TRUE) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=90))
+
+gg.spikedros / gg.spikecarp
+
+```
+
+
+
+Need to add a batch variable - perhaps for each farm they came from?
+
+Try using one spike in vs geometric mean of multiple spike ins as denominator
+
+Need to add some filtering of index switching?
+
+```{r Carpophilus bias}
+#Remove anything not assigned below the root rank
+ps_bias <- ps.merged %>%
+  subset_samples(str_detect(sample_names(ps.merged), "-s-"))
+
+#Agglomerate to species and subset to primers
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
+tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
+tax_table(ps_bias)[,7][which(rownames(tax_table(ps_bias))=="ACTATCATCTAATATTGCCCATGGAGGTTCTTCAGTTGATTTGGCTATTTTTAGTCTTCATTTAGCAGGAATTTCTTCTATTTTAGGAGCTGTAAATTTTATTACTACTGTAATTAACATACGACCTACTGGAATATCATTTGACCGGATACCTTTATTTGTATGGGCTGTTGTTATTACAGCTATCCTTCTTCTTTTATCATTA")] <- "Synthetic_denom"
+ps_bias <- tax_glom(ps_bias, taxrank="Species")
+
+taxa_names(ps_bias) <- paste0("SV", seq(ntaxa(ps_bias)),"-",tax_table(ps_bias)[,7])
+
+
+sam <- psmelt(ps_bias) %>%
+  arrange(Abundance)%>%
+  mutate(Taxon = Species) %>%
+  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp1", replacement = "Brachypeplus_Sp")) %>%
+  mutate(OTU = str_replace_all(OTU, pattern="Brachypeplus_Sp2", replacement = "Brachypeplus_Sp")) %>%
+  distinct()
+
+exp <- read_csv("sample_data/expected_quant_EDIT.csv") %>%
+  gather(Species, Abundance, -X1) %>%
+  mutate(Species = str_replace(Species, pattern=" ",replacement="_")) %>%
+  filter(str_detect(X1,"CM|CT")) %>%
+  drop_na() %>%
+  set_colnames(c("Sample","Taxon","Actual"))
+
+#Subset to only those taxa desired for estimation
+#controls <- c("CM1-ex1","CM2-ex1","CM3-ex1","CM5-ex1", "CM6-ex1", "CM6-ex2","CM9-ex1","CM9-ex2")
+#controls <- c("CM6-ex1","CM6-ex2","CM7-ex1","CM7-ex2","CM9-ex1","CM9-ex2")
+#Join tables 
+joint <- sam %>%
+  filter(Taxon %in% exp$Taxon) %>%
+  filter(material =="Carpophilus Adults") %>%
+  group_by(Taxon, Sample, treatment) %>% 
+  summarise(Abundance = sum(Abundance)) %>%
+  ungroup() %>%
+ # filter(target_subfragment == "fwhF2-fwhR2n") %>%
+  #mutate(Type = ifelse(Sample %in% controls, "Est", "Eval")) %>%
+  left_join(exp, by = c("Sample","Taxon")) %>%
+  mutate(Actual = replace_na(Actual, 0)) %>%
+  mutate(Observed0 = (Abundance + 0.5) * (Actual > 0)) %>%
+  mutate(Error = Observed0 / Actual) %>%
+  distinct()
+
+
+```
+
+#Bias using ALR
+
+```{r alr}
+## MATRIX
+observed_mat <- t(build_matrix(joint, Sample, Taxon, Observed0))
+
+#observed_mat <- t(observed_mat + 0.5) 
+
+#Scale by the spike in
+observed_mat <- apply(observed_mat, 1, function(x) x/observed_mat[6,])
+actual_mat <- build_matrix(joint, Sample, Taxon, Actual)
+
+control_samples <- rownames(actual_mat)
+control_taxa <- colnames(actual_mat)
+observed_mat <- observed_mat[control_samples, control_taxa]
+actual_mat <- actual_mat[control_samples, control_taxa]
+
+error_mat <- observed_mat / actual_mat
+
+
+#Estimate bias by target_
+#error_mat <- build_matrix(joint, Sample, Taxon, Error)
+
+bias_alr <- center(error_mat, enframe = TRUE, method = "proj", denom="Synthetic_denom") %>%
+    dplyr::rename(Bias = Center)
+bias_alr
+
+reps <- bootrep_center(error_mat, method = "proj", denom="Synthetic_denom") %>%
+    dplyr::rename(Bias = Center)
+
+#Plot bootstraps
+library(ggridges)
+gg.boot <- ggplot(reps, aes(x = Bias-1, y = Taxon, fill=Taxon)) +
+    geom_density_ridges(scale = 4) + 
+  #theme_ridges() +
+    geom_vline(xintercept = 0, color = "black", size=2) +
+  scale_y_discrete(expand = c(0.01, 0)) +   # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0), limits=c(-1.5, 4)) + 
+  ggtitle("Bootstrap standard errors of bias estimates for each primer set") +
+  scale_fill_brewer(palette = "Spectral") + 
+  xlab("Efficiancy / Spike in") 
+
+gg.boot
+#Calibration
+cal <- joint %>%
+    left_join(bias_alr, by = c("Taxon")) %>%
+    dplyr::mutate(Calibrated = Abundance / Bias) 
+
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+# Could assume that all other taxa have a bias of 1 and just set them to that?
+gg.alr <- cal %>%
+    group_by(Sample) %>%
+    filter(!Taxon=="Synthetic_denom") %>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using ALR and mclaren")
+
+#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
+
+```
+
+# Calibration
+
+## CLR
+```{R}
+
+error_mat <- build_matrix(joint, Sample, Taxon, Error)
+
+bias_clr <- center(error_mat, enframe = TRUE, method="proj") %>%
+    dplyr::rename(Bias = Center)
+
+bias_clr
+
+bootreps <- bootrep_center(error_mat, method="proj") %>%
+    dplyr::rename(Bias = Center)
+
+bootreps.summary <- bootreps %>%
+    group_by(Taxon) %>%
+    summarize(Gm_mean = gm_mean(Bias), Gm_se = gm_sd(Bias))
+
+#Calibration
+cal_clr <- joint %>%
+    left_join(bias_clr, by = c("Taxon")) %>%
+    dplyr::mutate(Calibrated = Abundance / Bias) 
+
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+# Could assume that all other taxa have a bias of 1 and just set them to that?
+cal.prop <- cal_clr %>%
+    group_by(Sample) %>%
+    filter(!Taxon=="Synthetic_denom") %>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.)) %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using model of Mclaren et al 2019")
+
+#also make another plot showing the bias in the estimates from the amount of controls used - see https://mikemc.github.io/mgs-bias-manuscript/analysis/costea2017-analysis.html
+
+```
+
+
+## Linear model without alr
+```{r alr Linear model}
+## Linear model
+main1 <- joint %>%
+  #filter(material == "Carpophilus Adults") %>%
+  #filter(Type=="Est") %>%
+  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique())) %>%
+  group_by(Sample) %>%
+  mutate_at(vars(Abundance, Actual), ~ . / sum(.) )%>%
+  dplyr::select(Sample, Taxon, Abundance, Actual) %>% 
+  ungroup()
+
+bias.slm <- main1 %>%
+    group_by(Taxon) %>%
+    nest() %>%
+    mutate(fit = map(data, ~lm(Abundance ~ 0 + Actual, data = .)),
+           tidied = map(fit, broom::tidy)) %>%
+  #unnest(data) %>%
+  unnest(tidied) %>%
+  select(Taxon, estimate, std.error) 
+
+
+gg.slmcal <- joint %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / estimate) %>%
+      filter(!Taxon=="Synthetic_denom") %>%
+    group_by(Sample) %>%
+  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using linear model")
+
+```
+
+
+## Linear model with alr
+```{r alr Linear model}
+#ALR on matrix
+observed_mat <- t(build_matrix(joint, Sample, Taxon, Observed0))
+
+#Scale by the spike in
+observed_mat <- apply(observed_mat, 1, function(x) x/observed_mat[6,])
+
+bias.alrlm <- observed_mat %>% 
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  gather("Taxon", "Trans_Abundance", -Sample) %>% 
+  left_join(joint, by=c("Sample", "Taxon")) %>%
+  filter(!Taxon=="Synthetic_denom") %>%
+  mutate_at(vars(Abundance, Trans_Abundance, Actual), ~ . / sum(.) ) %>%
+    group_by(Taxon) %>%
+    nest() %>%
+    #mutate(fit = map(data, ~lm(Trans_Abundance ~ 0 + Actual, data = .)),
+    #       tidied = map(fit, broom::tidy)) %>%
+  mutate(fit = map(data, ~lm(Trans_Abundance ~ 0 + Actual, data = .)),
+           tidied = map(fit, broom::tidy)) %>%
+  #unnest(data) %>%
+  unnest(tidied) %>%
+  select(Taxon, estimate, std.error) 
+
+
+gg.alrlmcal <- joint %>%
+    left_join(bias.alrlm, by = c("Taxon")) %>%
+    mutate(Calibrated = Abundance / estimate) %>%
+    filter(!Taxon=="Synthetic_denom") %>%
+    group_by(Sample) %>%
+  #filter(Taxon %in% (joint %>% filter(Type =="Est") %>% filter(Actual > 0) %>% pull(Taxon) %>% unique()))%>%
+    mutate_at(vars(Abundance, Calibrated, Actual), ~ . / sum(.))  %>%
+    gather("Type", "Proportion", "Abundance", "Calibrated", "Actual") %>%
+    mutate(Type = factor(Type, c("Actual","Abundance", "Calibrated"))) %>%
+  ggplot(aes(Type, Proportion, fill = Taxon)) +
+    geom_col() +
+    facet_wrap(~Sample, drop=TRUE) +
+    theme_bw() +
+    theme(legend.position="none") +
+    scale_fill_brewer(palette = "Spectral") +
+  ggtitle("Calibration using linear model and alr transform")
+
+```
+
+
+# Compare models
+```{r Compare models}
+#Plot expected vs observed
+
+correction <- joint %>%
+    #filter(material == "Carpophilus Adults") %>%
+    left_join(bias_alr, by = c("Taxon")) %>%
+    mutate(alr_cal = Abundance / Bias) %>%
+    select(-Bias) %>%
+    left_join(bias_clr, by = c("Taxon")) %>%
+    mutate(clr_cal = Abundance / Bias) %>%
+    select(-Bias) %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(lm = Abundance / estimate) %>%
+    select(-estimate, -std.error) %>%
+    left_join(bias.alrlm, by = c("Taxon")) %>%
+    mutate(alrlm = Abundance / estimate) %>%
+    select(-estimate, -std.error) %>% 
+  filter(!Taxon=="Synthetic_denom")  %>%
+    group_by(Sample) %>%
+    mutate_at(vars(Abundance, alr_cal, clr_cal, Actual, lm, alrlm), ~ . / sum(.)) %>% 
+    ungroup() %>%
+    dplyr::select(Sample, Taxon, Actual, alr_cal, clr_cal, Abundance, lm, alrlm) %>%
+  dplyr::rename(Observed = Abundance) %>%
+  tidyr::gather(Type, Abundance, -Sample, -Taxon, -Actual)  %>%
+  mutate(Type = factor(Type, levels = c("Observed", "lm", "clr_cal", "alr_cal", "alrlm"))) %>%
+  filter(!is.nan(Abundance), Actual > 0) %>%
+  distinct()
+
+#To scale with spike in, multiply everything by difference between observed reads and expected COI copies for the spikes
+
+#
+
+gg.cor <- ggplot(correction, aes(x=Actual,y=Abundance)) +
+  geom_point(aes(colour=Type, shape=Type), size=3, alpha=0.8, stroke=1) + 
+  geom_abline(slope=1, intercept = 0) +
+  stat_cor(aes(color=Type, label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), label.x = 0.1)  + 
+  #facet_wrap(~Taxon) +
+  xlim(0,1) + 
+  ylim(0,1) + 
+  #scale_fill_manual(values=col) + 
+  #scale_colour_manual(values=col) +
+  #theme_bw() + 
+  ylab("Observed")
+
+col <- c(Observed= "#808080", alrlm = "#cb181d")
+#BW Expected
+gg.cor1 <- ggplot(correction %>% filter(Type %in% c("Observed", "alrlm")), aes(x=Actual,y=Abundance)) +
+  geom_point(aes(colour=Type, fill=Type),shape = 21, size = 3, color = "black", alpha=0.8, stroke=1) + 
+  geom_abline(slope=1, intercept = 0) +
+  stat_cor(aes(color=Type, label = paste(..rr.label.., sep = "~`,`~")), label.x = 0.1)  + 
+  #facet_wrap(~Taxon) +
+  xlim(0,1) + 
+  ylim(0,1) + 
+  scale_fill_manual(values=col) + 
+  scale_colour_manual(values=col) +
+  theme_bw() + 
+      theme(legend.position="none") +
+  ylab("Observed")
+
+
+
+preds <- joint  %>%
+    left_join(bias_alr, by = c("Taxon")) %>%
+    mutate(alr_cal = Abundance / Bias) %>%
+    select(-Bias) %>%
+    left_join(bias_clr, by = c("Taxon")) %>%
+    mutate(clr_cal = Abundance / Bias) %>%
+    select(-Bias) %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    mutate(lm = Abundance / estimate) %>%
+   select(-estimate, -std.error) %>%
+    left_join(bias.alrlm, by = c("Taxon")) %>%
+    mutate(alrlm = Abundance / estimate) %>%
+    select(-estimate, -std.error) %>%
+    filter(!Taxon=="Synthetic_denom")  %>%
+    filter(Actual > 0 ) %>%
+    group_by(Sample) %>%
+    mutate_at(vars(Observed0, alr_cal, clr_cal, Actual, lm, alrlm), ~ . / sum(.)) %>% 
+    ungroup() %>%
+    gather("Model", "Predicted", alr_cal, clr_cal, lm, alrlm)
+
+
+ggplot(preds, aes(logit(Predicted), logit(Observed0), color = Taxon)) +
+    geom_abline(intercept = 0, slope = 1, color = "grey") +
+    geom_jitter(width = 0.1, height = 0) +
+    facet_grid(~Model) +
+    labs(x = "log-odds(Predicted proportion)", 
+        y = "log-odds(Observed proportion)") +
+    coord_fixed() +
+    theme(
+        panel.spacing.x = unit(1, "lines"),
+        legend.position = "bottom",
+    ) + scale_color_brewer(palette="Spectral")
+
+
+
+
+error <- joint %>%
+    #filter(material == "Carpophilus Adults") %>%
+    left_join(bias_alr, by = c("Taxon")) %>%
+    dplyr::rename(alr_est = Bias) %>%
+    left_join(bias_clr, by = c("Taxon")) %>%
+    dplyr::rename(clr_est = Bias)  %>%
+    left_join(bias.slm, by = c("Taxon")) %>%
+    dplyr::rename(lm_est = estimate) %>%
+    select(-std.error) %>%
+    left_join(bias.alrlm, by = c("Taxon")) %>%
+    dplyr::rename(alrlm_est = estimate) %>%
+    select(-std.error) %>% 
+  filter(!Taxon=="Synthetic_denom") %>%
+      filter(Actual > 0 ) %>%
+    mutate(`No bias` = 1) %>%
+    gather("Bias_type", "Bias", `No bias`, alr_est, clr_est, lm_est, alrlm_est) %>%
+    mutate(Predicted = (Actual * Bias)) %>%
+    mutate_at(vars(Predicted, Actual, Observed0), ~ . / sum(.)) %>% 
+    group_by(Bias_type) %>%
+    summarize(
+        MSE.prop = mean((Observed0 - Predicted)^2),
+        MSE.logit = mean((logit(Observed0) - logit(Predicted))^2),
+        RMSE.logit = sqrt(mean( (logit(Observed0) - logit(Predicted))^2 )),
+        )
+
+```
+

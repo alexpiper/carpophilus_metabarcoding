@@ -78,16 +78,8 @@ library(CoDaSeq)
 library(metacal)
 
 #Source themes
-source('R/themes.R')
-
-#Create safe predict function
-safe_predict <- function(model,data){
-  if(is.null(data) | is(model, "data.frame") ){
-    return(NULL)
-  }
-    predict(model, data)
-}
-
+source("R/themes.R")
+source("R/helper_functions.R")
 ```
 
 ## Make Phyloseq object
@@ -394,7 +386,7 @@ joint <- sam %>%
   mutate(expected = replace_na(expected, 0),
          observed0 = (observed + 0.5) * (expected > 0),
          error = observed0 / expected,
-        # error_centre = center_elts(observed0 / expected, na.rm = TRUE),
+         #error_centre = center_elts(observed0 / expected, na.rm = TRUE),
          ) %>%
   distinct() %>%
   group_by(sample_id) %>%
@@ -403,7 +395,7 @@ joint <- sam %>%
   mutate(sample_size = sum(expected), # Do the same for the ratios?
          observed_abs = observed.prop * sample_size,
          error_abs = observed_abs / expected,
-         error_prop = observed.prop / expected.prop
+         error_prop = observed.prop / expected.prop,
          #error_abs_centre = center_elts(observed_abs / expected, na.rm = TRUE)
          )  %>%
   group_by(sample_id) %>%
@@ -428,7 +420,8 @@ joint <- sam %>%
     .x %>%
       mutate(error_abs_alr = log(error_abs / alr_denom),
              error_abs_clr = log(error_abs / clr_denom))
-  })
+  })%>%
+  filter(!sample_id=="HLVKYDMXX_CML6") #Bad sample
 
 ```
 
@@ -518,7 +511,6 @@ try(dev.off(), silent=TRUE)
 ```{r splits}
 set.seed(666)
 
-
 #Sample splits
 joint_split <- joint %>%
   ungroup() %>%
@@ -534,7 +526,17 @@ joint_train <- joint %>%
   ungroup()%>%
   pivot_longer(starts_with("error"),
                names_to="error_type",
-               values_to="error")
+               values_to="error") %>%
+  mutate(observed.prop =case_when(
+    error_type == "error_prop" ~ logit(observed.prop),
+    error_type == "error_abs" ~ log(observed_abs),
+    TRUE ~ observed.prop
+    ),
+    expected.prop = case_when(
+    error_type == "error_prop" ~ logit(expected.prop),
+    error_type == "error_abs" ~ log(expected),
+    TRUE ~ expected.prop
+    ))
 
 # Testing set
 joint_test <- joint %>%
@@ -544,7 +546,17 @@ joint_test <- joint %>%
   ungroup()%>%
   pivot_longer(starts_with("error"),
                names_to="error_type",
-               values_to="error")
+               values_to="error")%>%
+  mutate(observed.prop =case_when(
+    error_type == "error_prop" ~ logit(observed.prop),
+    error_type == "error_abs" ~ log(observed_abs),
+    TRUE ~ observed.prop
+    ),
+    expected.prop = case_when(
+    error_type == "error_prop" ~ logit(expected.prop),
+    error_type == "error_abs" ~ log(expected),
+    TRUE ~ expected.prop
+    ))
 
 # Check for data bleeding
 table(joint_train$sample_id %in% joint_test$sample_id)
@@ -564,21 +576,40 @@ train_cv <- joint_train %>%
 ```{r uncorrected errors}
 uncorrected_results_train <- joint_train %>%
   mutate(
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
   predicted = observed.prop,
-  calibrated = observed.prop
+  calibrated = observed.prop,
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
+
 uncorrected_results_test <- joint_test %>%
   mutate(
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
   predicted = observed.prop,
-  calibrated = observed.prop
+  calibrated = observed.prop,
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
@@ -607,8 +638,7 @@ bias_recipe_separate <-
   #step_normalize(-all_nominal()) 
 
 #Recipe for fitting model to proportions
-prop_recipe <- 
-  recipe(formula = observed.prop ~ 0 + expected.prop + taxon + fcid + material_type, data = joint_train) %>% 
+prop_recipe <- recipe(formula =  expected.prop ~ 0 + observed.prop + taxon + fcid + material_type, data = joint_train) %>% 
   #step_string2factor(one_of(fcid, material_type)) %>% 
   step_string2factor(taxon) %>% 
   step_novel(all_nominal(), -all_outcomes()) %>% 
@@ -616,134 +646,22 @@ prop_recipe <-
   step_zv(all_predictors()) 
 
 prop_recipe_separate <- 
-  recipe(formula = observed.prop ~ 0 + expected.prop + taxon , data = joint_train) %>% 
+  recipe(formula = expected.prop ~ 0 + observed.prop + taxon, data = joint_train) %>% 
   #step_string2factor(one_of(fcid, material_type)) %>% 
   step_string2factor(taxon) %>% 
   step_novel(all_nominal(), -all_outcomes()) %>% 
   step_dummy(all_nominal(), -all_outcomes(), one_hot=TRUE) %>% 
-  step_zv(all_predictors()) 
+  step_zv(all_predictors())
 
 ```
 
 
-## Simple LM on proportions
-
-```{r simple lm}
-# Specify LM
-lm_spec <- linear_reg() %>%
-  set_engine(engine = "lm")
-lm_spec
-
-fit_lm <- joint_train %>%
-  filter(expected > 0) %>%
-  group_by(material_type, fcid) %>%
-  nest() %>%
-  dplyr::rename(train=data)%>%
-  left_join(joint_test %>%
-  filter(expected > 0) %>%
-  group_by(material_type, fcid) %>%
-  nest() %>%
-  dplyr::rename(test=data)) %>%
-  mutate(model_obj = map(train, ~fit(lm_spec, expected.prop ~ 0 + observed.prop + taxon, data = .)),
-         pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
-         pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
-         coef_info = purrr::map(model_obj, tidy)
-    ) 
-#results
-lm_results_train <- fit_lm %>%
-  unnest(pred_train, train) %>%
-  dplyr::select(!where(is.list))%>%
-  mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
-    TRUE ~ .pred
-  ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
-  ) %>%
-  group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
-  ungroup() %>%
-  dplyr::filter(expected > 0) %>%
-  mutate(residuals = expected.prop / calibrated)
-
-lm_results_train %>%
-  group_by(material_type) %>%
-  rmse(truth = observed.prop, estimate = predicted)
-
-# Results test set
-lm_results_test <- fit_complm %>%
-  unnest(pred_test, test) %>%
-  dplyr::select(!where(is.list))%>%
-  mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
-    TRUE ~ .pred
-  ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
-  ) %>%
-  group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
-  ungroup() %>%
-  dplyr::filter(expected > 0)
-
-lm_results_test %>%
-  group_by(error_type) %>%
-  rmse(truth = observed, estimate = predicted)
-
-
-# Move the method of using coefficients from proportions to the other model types as well
-
-# Results
-lm_results_train <-  fit_lm %>%
-  unnest(train) %>%
-  left_join(fit_lm %>% 
-              unnest(coef_info) %>% 
-              dplyr::select(taxon, estimated = estimate, material_type, fcid)) %>% 
-  dplyr::filter(expected > 0) %>%
-  mutate(
-    predicted = expected.prop * estimated,
-    calibrated = observed.prop / estimated
-    )  %>%
-  group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted, calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)%>% 
-    dplyr::select(!where(is.list))
-
-lm_results_train %>%
-  group_by(material_type) %>%
-  rmse(truth = observed.prop, estimate = predicted)
-
-
-# Results test set
-lm_results_test <-  fit_lm %>%
-  unnest(test) %>%
-  left_join(fit_lm %>% 
-              unnest(coef_info) %>% 
-              dplyr::select(taxon, estimated = estimate, material_type, fcid)) %>% 
-  dplyr::filter(expected > 0) %>%
-  mutate(
-    predicted = expected.prop * estimated,
-    calibrated = observed.prop / estimated
-    )  %>%
-  group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted, calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
-  dplyr::filter(expected > 0)%>% 
-    dplyr::select(!where(is.list))
-
-lm_results_test %>%
-  group_by(material_type) %>%
-  rmse(truth = observed.prop, estimate = predicted)
-
-```
-
-## CompLM
+## Linear regression
 Estimating bias is complicated by the compositional nature of metabarcoding measurements. Because only relative abundances are measured, the measurement of a sample (s) only provides information about the efficiencies of the taxa in the sample relative to each other.
 
 Here we fit a simple linear model on the compositional difference between Observed and Expected counts. The compositional error vectors are first geometrically centered, then taxon is used as a predictor.
 
-```{r complm}
+```{r linear regression}
 lm_spec <- 
   linear_reg() %>% 
   set_mode("regression") %>% 
@@ -752,72 +670,39 @@ lm_spec <-
 #Ratios workflow
 lm_workflow_rat <- 
   workflow() %>% 
-  add_recipe(bias_recipe_separate) %>% 
+  add_recipe(bias_recipe) %>% 
   add_model(lm_spec)
 
 # Proportions workflow
 lm_workflow_prop <- 
   workflow() %>% 
-  add_recipe(prop_recipe_separate) %>% 
+  add_recipe(prop_recipe) %>% 
   add_model(lm_spec)
 
 # Fit model to ratios and proportions
-fit_complm <- joint_train %>%
+fit_lm <- joint_train %>%
   filter(expected > 0) %>%
-  group_by(error_type, fcid, material_type) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
   filter(expected > 0) %>%
-  group_by(error_type, fcid, material_type ) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  bind_cols(group_keys(.) %>%
-              tidyr::unite("group_names", everything(), sep="-")) %>%
+  left_join(group_keys(.) %>%
+            tidyr::unite("group_names", everything(), sep="-", remove=FALSE)) %>%
   mutate(
     model_obj = purrr::map2(train, error_type, function(x,y ){
-      
-      if (!y =="error_prop"){
+      if (!y %in% c("error_prop", "error_abs")){
         fit(lm_workflow_rat, data=x)
-      } else if(error_type == "error_prop"){
-        model_fit <- fit(lm_workflow_prop, data=x)
-        # predict a fake table with all values at 1 to get taxon correction factors
-        crossing(taxon = unique(x$taxon),
-                           fcid = unique(x$fcid),
-                           material_type = unique(x$material_type))%>%
-          mutate(expected.prop = 1) %>%
-          bind_cols(safe_predict(model_fit, new_df)) %>%
-          dplyr::select(-expected.prop)%>%
-          dplyr::select(taxon, .pred)
+      } else if(error_type %in% c("error_prop", "error_abs")){
+        fit(lm_workflow_prop, data=x)
       }
     }),
-    pred_train = purrr::map2(model_obj, train, function(x,y ){
-      if(is.null(y)){
-        return(NULL)
-      }
-      # predict ratios
-      if(!is(x, "data.frame")){
-        safe_predict(x, y)
-      }else if( is(x, "data.frame")){ 
-        # predict 
-      y %>%
-        left_join(x)
-      }
-    }),
-    pred_test = purrr::map2(model_obj, test, function(x,y ){
-      if(is.null(y)){
-        return(NULL)
-      }
-      # predict ratios
-      if(!is(x, "data.frame")){
-        safe_predict(x, y)
-      }else if( is(x, "data.frame")){ 
-        # predict 
-      y %>%
-        left_join(x)
-      }
-    }),
-    vip = purrr::map2(model_obj, group_names,~{
+    pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+    pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
+    vip = purrr::map2(model_obj, group_names ,~{
       if(!is(.x, "data.frame")){
         .x %>%
         pull_workflow_fit() %>%
@@ -826,60 +711,82 @@ fit_complm <- joint_train %>%
       } else{
         return(NULL)
       }
-      
     })
   )
 
-
 # Plot model variable importance
-wrap_plots(fit_complm %>%
-             filter(!error_type=="error_prop") %>%
+wrap_plots(fit_lm %>%
              pull(vip))
 
 #results
-complm_results_train <- fit_complm %>%
+lm_results_train <- fit_lm %>%
   unnest(pred_train, train) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
-  dplyr::filter(expected > 0) %>%
-  mutate(residuals = expected.prop / calibrated)
+  dplyr::filter(expected > 0) 
 
-complm_results_train %>%
+lm_results_train %>%
   group_by(error_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  rmse(truth = observed.prop, estimate = predicted)
 
 # Results test set
-complm_results_test <- fit_complm %>%
+lm_results_test <- fit_lm %>%
   unnest(pred_test, test) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
-complm_results_test %>%
+lm_results_test %>%
   group_by(error_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  rmse(truth = observed.prop, estimate = predicted)
 
-complm_results_test %>%
+lm_results_train %>%
   ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
   geom_abline(intercept = 0, slope=1) +
   geom_jitter(alpha=0.7, shape=21, colour="black", ) +
@@ -895,108 +802,155 @@ complm_results_test %>%
 ## LASSO
 
 ```{r LASSO}
-glmnet_spec <- 
+lasso_spec <- 
     linear_reg(penalty = tune(), mixture = tune()) %>% 
     set_mode("regression") %>% 
     set_engine("glmnet") %>%
     set_args(family="gaussian")
   
 # Tune ratio workflow
-glmnet_workflow_rat <- 
+lasso_workflow_rat <- 
     workflow() %>% 
-    add_recipe(bias_recipe_separate) %>% 
-    add_model(glmnet_spec) 
+    add_recipe(bias_recipe) %>% 
+    add_model(lasso_spec) 
   
-glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
+lasso_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
     0.2, 0.4, 0.6, 0.8, 1)) 
 
-glmnet_tune <- tune_grid(glmnet_workflow_rat, resamples = train_cv, grid = glmnet_grid)
+lasso_tune <- tune_grid(lasso_workflow_rat, resamples = train_cv, grid = lasso_grid)
 
- autoplot(glmnet_tune , metric = "rmse") +
+autoplot(lasso_tune , metric = "rmse") +
   scale_x_log10()
 
-glmnet_workflow_rat <- finalize_workflow(glmnet_workflow_rat, glmnet_tune %>%
+lasso_workflow_rat <- finalize_workflow(lasso_workflow_rat, lasso_tune %>%
   select_best("rmse"))
 
-fit_compglm <- joint_train %>%
+# Tune proporiton workflow
+lasso_workflow_prop <- 
+    workflow() %>% 
+    add_recipe(prop_recipe) %>% 
+    add_model(lasso_spec) 
+  
+lasso_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
+    0.2, 0.4, 0.6, 0.8, 1)) 
+
+lasso_tune <- tune_grid(lasso_workflow_prop, resamples = train_cv, grid = lasso_grid)
+
+autoplot(lasso_tune , metric = "rmse") +
+  scale_x_log10()
+
+lasso_workflow_prop <- finalize_workflow(lasso_workflow_prop, lasso_tune %>%
+  select_best("rmse"))
+
+fit_lasso <- joint_train %>%
   filter(expected > 0) %>%
-  filter(!error_type=="error_prop") %>%
-  group_by(error_type, fcid, material_type) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
   filter(expected > 0) %>%
-  group_by(error_type, fcid, material_type) %>%
+  group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  bind_cols(group_keys(.) %>%
-              tidyr::unite("group_names", everything(), sep="-")) %>%
-  mutate(model_obj = purrr::map(train, ~fit(glmnet_workflow, data=.)),
-         pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
-         pred_test = purrr::map2(model_obj, test,  ~safe_predict(.x, .y)),
-         vip = purrr::map2(model_obj, group_names,~{
-           .x %>%
-             pull_workflow_fit() %>%
-             vip::vip()+
-             labs(title=.y %>% str_remove("error_"))
-         })
-    )
-
-
-
- # Plot model variable importance
-wrap_plots(fit_complm %>%
-             filter(!error_type=="error_prop") %>%
-             pull(vip))
-
+  left_join(group_keys(.) %>%
+            tidyr::unite("group_names", everything(), sep="-", remove=FALSE)) %>%
+  mutate(
+    model_obj = purrr::map2(train, error_type, function(x,y ){
+      if (!y  %in% c("error_prop", "error_abs")){
+        fit(lasso_workflow_rat, data=x)
+      } else if(error_type  %in% c("error_prop", "error_abs")){
+        fit(lasso_workflow_prop, data=x)
+      }
+    }),
+    pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+    pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
+    vip = purrr::map2(model_obj, group_names,~{
+      if(!is(.x, "data.frame")){
+        .x %>%
+        pull_workflow_fit() %>%
+        vip::vip()+
+        labs(title=.y %>% str_remove("error_"))
+      } else{
+        return(NULL)
+      }
+      
+    })
+  )
 
 # Plot model variable importance
-wrap_plots(fit_compglm$vip)
+wrap_plots(fit_lasso$vip)
 
 #results
-compglm_results_train <- fit_compglm %>%
+lasso_results_train <- fit_lasso %>%
   unnest(pred_train, train) %>%
   dplyr::select(!where(is.list))%>%
   ungroup() %>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   mutate(residual = calibrated / expected.prop) %>%
   dplyr::filter(expected > 0)
 
-compglm_results_train %>%
+lasso_results_train %>%
   group_by(error_type) %>%
   rmse(truth = observed.prop, estimate = predicted)
 
 # Results test set
-compglm_results_test <- fit_compglm %>%
+lasso_results_test <- fit_lasso %>%
   unnest(pred_test, test) %>% 
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated,
-  residual = calibrated / expected.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
-compglm_results_test %>%
+lasso_results_test %>%
   group_by(error_type) %>%
   rmse(truth = observed.prop, estimate = predicted)
 
-compglm_results_train %>%
+lasso_results_test %>%
   ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
   geom_abline(intercept = 0, slope=1) +
   geom_jitter(alpha=0.7, shape=21, colour="black", ) +
@@ -1016,21 +970,33 @@ ranger_spec <-
   set_mode("regression") %>% 
   set_engine("ranger", importance = "impurity") 
 
-ranger_workflow <- 
+#Ratio workflow
+ranger_workflow_rat <- 
   workflow() %>% 
   add_recipe(bias_recipe) %>% 
   add_model(ranger_spec) 
 
 doParallel::registerDoParallel(cores=2)
 set.seed(666)
-ranger_tune <- tune_grid(ranger_workflow, resamples = train_cv, grid = 20)
+ranger_tune <- tune_grid(ranger_workflow_rat, resamples = train_cv, grid = 20)
 
 autoplot(ranger_tune , metric = "rmse") 
 
-best_rf <- ranger_tune %>%
-  select_best("rmse")
+ranger_workflow_rat <- finalize_workflow(ranger_workflow_rat, ranger_tune %>%
+  select_best("rmse"))
 
-ranger_workflow <- finalize_workflow(ranger_workflow, ranger_tune %>%
+#Proporiton workflow
+ranger_workflow_prop <- 
+  workflow() %>% 
+  add_recipe(prop_recipe) %>% 
+  add_model(ranger_spec) 
+
+set.seed(666)
+ranger_tune <- tune_grid(ranger_workflow_prop, resamples = train_cv, grid = 20)
+
+autoplot(ranger_tune , metric = "rmse") 
+
+ranger_workflow_prop <- finalize_workflow(ranger_workflow_prop, ranger_tune %>%
   select_best("rmse"))
 
 fit_rf <- joint_train %>%
@@ -1043,18 +1009,30 @@ fit_rf <- joint_train %>%
   group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  bind_cols(group_keys(.) %>%
-              tidyr::unite("group_names", everything(), sep="-")) %>%
-  mutate(model_obj = purrr::map(train, ~fit(ranger_workflow, data=.)),
-         pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
-         pred_test = purrr::map2(model_obj, test,  ~safe_predict(.x, .y)),
-         vip = purrr::map2(model_obj, group_names,~{
-           .x %>%
-             pull_workflow_fit() %>%
-             vip::vip()+
-             labs(title=.y %>% str_remove("error_"))
-         })
-    )
+  left_join(group_keys(.) %>%
+            tidyr::unite("group_names", everything(), sep="-", remove=FALSE)) %>%
+  mutate(
+    model_obj = purrr::map2(train, error_type, function(x,y ){
+      if (!y  %in% c("error_prop", "error_abs")){
+        fit(ranger_workflow_rat, data=x)
+      } else if(error_type  %in% c("error_prop", "error_abs")){
+        fit(ranger_workflow_prop, data=x)
+      }
+    }),
+    pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+    pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
+    vip = purrr::map2(model_obj, group_names,~{
+      if(!is(.x, "data.frame")){
+        .x %>%
+        pull_workflow_fit() %>%
+        vip::vip()+
+        labs(title=.y %>% str_remove("error_"))
+      } else{
+        return(NULL)
+      }
+      
+    })
+  )
 
 # Plot model variable importance
 wrap_plots(fit_rf$vip)
@@ -1064,15 +1042,28 @@ rf_results_train <- fit_rf %>%
   unnest(pred_train, train) %>% 
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
@@ -1085,21 +1076,34 @@ rf_results_test <- fit_rf %>%
   unnest(pred_test, test) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
 rf_results_test %>%
   group_by(error_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  rmse(truth = observed.prop, estimate = predicted)
 
 rf_results_test %>%
   ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
@@ -1124,19 +1128,33 @@ xgboost_spec <-
   set_mode("regression") %>% 
   set_engine("xgboost") 
 
-xgboost_workflow <- 
-  workflow() %>% 
+# Ratio workflow
+xgboost_workflow_rat <- workflow() %>% 
   add_recipe(bias_recipe) %>% 
   add_model(xgboost_spec) 
 
 doParallel::registerDoParallel(cores=2)
 set.seed(666)
 xgboost_tune <-
-  tune_grid(xgboost_workflow, resamples = train_cv, grid =20)
+  tune_grid(xgboost_workflow_rat, resamples = train_cv, grid =20)
 
 autoplot(xgboost_tune , metric = "rmse") 
 
-xgboost_workflow <- finalize_workflow(xgboost_workflow, xgboost_tune %>%
+xgboost_workflow_rat <- finalize_workflow(xgboost_workflow_rat, xgboost_tune %>%
+  select_best("rmse"))
+
+# Proportion workflow
+xgboost_workflow_prop <- workflow() %>% 
+  add_recipe(prop_recipe) %>% 
+  add_model(xgboost_spec) 
+
+doParallel::registerDoParallel(cores=2)
+set.seed(666)
+xgboost_tune <- tune_grid(xgboost_workflow_prop, resamples = train_cv, grid =20)
+
+autoplot(xgboost_tune , metric = "rmse") 
+
+xgboost_workflow_prop <- finalize_workflow(xgboost_workflow_prop, xgboost_tune %>%
   select_best("rmse"))
 
 fit_xg <- joint_train %>%
@@ -1149,18 +1167,30 @@ fit_xg <- joint_train %>%
   group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  bind_cols(group_keys(.) %>%
-              tidyr::unite("group_names", everything(), sep="-")) %>%
-  mutate(model_obj = purrr::map(train, ~fit(xgboost_workflow, data=.)),
-         pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
-         pred_test = purrr::map2(model_obj, test,  ~safe_predict(.x, .y)),
-         vip = purrr::map2(model_obj, group_names,~{
-           .x %>%
-             pull_workflow_fit() %>%
-             vip::vip()+
-             labs(title=.y %>% str_remove("error_"))
-         })
-    )
+  left_join(group_keys(.) %>%
+            tidyr::unite("group_names", everything(), sep="-", remove=FALSE)) %>%
+  mutate(
+    model_obj = purrr::map2(train, error_type, function(x,y ){
+      if (!y %in%  c("error_prop", "error_abs") ){
+        fit(xgboost_workflow_rat, data=x)
+      } else if(error_type %in%  c("error_prop", "error_abs") ){
+        fit(xgboost_workflow_prop, data=x)
+      }
+    }),
+    pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+    pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
+    vip = purrr::map2(model_obj, group_names,~{
+      if(!is(.x, "data.frame")){
+        .x %>%
+        pull_workflow_fit() %>%
+        vip::vip()+
+        labs(title=.y %>% str_remove("error_"))
+      } else{
+        return(NULL)
+      }
+      
+    })
+  )
 
 # Plot model variable importance
 wrap_plots(fit_xg$vip)
@@ -1170,44 +1200,70 @@ xg_results_train <- fit_xg %>%
   unnest(pred_train, train) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
 xg_results_train %>%
   group_by(error_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  rmse(truth = observed.prop, estimate = predicted)
 
 # Results test set
 xg_results_test <- fit_xg %>%
   unnest(pred_test, test) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
 xg_results_test %>%
   group_by(error_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  rmse(truth = observed.prop, estimate = predicted)
 
-xg_results_train %>%
+xg_results_test %>%
   ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
   geom_abline(intercept = 0, slope=1) +
   geom_jitter(alpha=0.7, shape=21, colour="black", ) +
@@ -1225,24 +1281,38 @@ xg_results_train %>%
 These models dont seem to be estimating taxon specific slopes??? maybe biased for some
 
 ```{r Neural network}
-keras_spec <- 
-  linear_reg(mixture=tune(),penalty = tune()) %>% 
+keras_spec <- linear_reg(mixture=tune(),penalty = tune()) %>% 
   set_mode("regression") %>% 
   set_engine("keras",verbose = 0) 
 
-keras_workflow <- 
+# Ratio workflow
+keras_workflow_rat <- 
   workflow() %>% 
   add_recipe(bias_recipe) %>% 
   add_model(keras_spec) 
 
 set.seed(666)
-keras_tune <-
-  tune_grid(keras_workflow, resamples = train_cv, grid =20)
+keras_tune <- tune_grid(keras_workflow_rat, resamples = train_cv, grid =20)
 
 autoplot(keras_tune , metric = "rmse") 
 
-keras_workflow <- finalize_workflow(keras_workflow, keras_tune%>%
+keras_workflow_rat <- finalize_workflow(keras_workflow_rat, keras_tune%>%
   select_best("rmse"))
+
+# Proportions workflow
+keras_workflow_prop <- 
+  workflow() %>% 
+  add_recipe(prop_recipe) %>% 
+  add_model(keras_spec) 
+
+set.seed(666)
+keras_tune <- tune_grid(keras_workflow_prop, resamples = train_cv, grid =20)
+
+autoplot(keras_tune , metric = "rmse") 
+
+keras_workflow_prop <- finalize_workflow(keras_workflow_prop, keras_tune%>%
+  select_best("rmse"))
+
 
 fit_keras <- joint_train %>%
   filter(expected > 0) %>%
@@ -1254,18 +1324,19 @@ fit_keras <- joint_train %>%
   group_by(error_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
-  bind_cols(group_keys(.) %>%
-              tidyr::unite("group_names", everything(), sep="-")) %>%
-  mutate(model_obj = purrr::map(train, ~fit(keras_workflow, data=.)),
-         pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
-         pred_test = purrr::map2(model_obj, test,  ~safe_predict(.x, .y)),
-         vip = purrr::map2(model_obj, group_names,~{
-           .x %>%
-             pull_workflow_fit() %>%
-             vip::vip()+
-             labs(title=.y %>% str_remove("error_"))
-         })
-    )
+  left_join(group_keys(.) %>%
+            tidyr::unite("group_names", everything(), sep="-", remove=FALSE)) %>%
+  mutate(
+    model_obj = purrr::map2(train, error_type, function(x,y ){
+      if (!y %in%  c("error_prop", "error_abs") ){
+        fit(keras_workflow_rat, data=x)
+      } else if(error_type %in%  c("error_prop", "error_abs") ){
+        fit(keras_workflow_prop, data=x)
+      }
+    }),
+    pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+    pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y))
+  )
 
 # Plot model variable importance
 wrap_plots(fit_xg$vip)
@@ -1276,42 +1347,68 @@ keras_results_train <- fit_keras %>%
   unnest(pred_train, train) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
 keras_results_train %>%
-  group_by(material_type) %>%
-  rmse(truth = observed, estimate = predicted)
+  group_by(error_type) %>%
+  rmse(truth = observed.prop, estimate = predicted)
 
 # Results test set
 keras_results_test <- fit_keras %>%
   unnest(pred_test, test) %>%
   dplyr::select(!where(is.list))%>%
   mutate(estimated = case_when(
-    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "errora_abs_log") ~ exp(.pred),
+    error_type %in% c("error_alr", "error_clr", "error_centre", "error_abs_centre", "error_abs_alr", "error_abs_clr","error_log", "error_abs_log", "error_abs") ~ exp(.pred),
+    error_type %in% c( "error_prop") ~ expit(.pred),
     TRUE ~ .pred
   ),
-  predicted = expected.prop * estimated, 
-  calibrated = observed.prop / estimated, 
-  observed = observed.prop
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
+  predicted = case_when(
+    error_type %in% c("error_prop", "error_abs") ~ estimated,
+    TRUE ~ expected.prop * estimated),
+  calibrated = case_when(
+    error_type %in% c("error_abs", "error_prop") ~ estimated,
+    TRUE ~ observed.prop / estimated),
+  residual = observed.prop / predicted
   ) %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted,calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
   dplyr::filter(expected > 0)
 
-keras_results_test %>%
-  group_by(material_type) %>%
-  rmse(truth = observed, estimate = predicted)
+keras_results_train %>%
+  group_by(error_type) %>%
+  rmse(truth = observed.prop, estimate = predicted)
 
 keras_results_test %>%
   ggplot(aes(logit(predicted), logit(observed.prop), fill = taxon)) + 
@@ -1452,12 +1549,13 @@ all(round(test3$.pred,4) == round(test4$.pred,4))
 # Fit metacal
 fit_metacal <- joint_train %>%
   filter(expected > 0) %>%
-  group_by(error_type) %>%
+  #filter(!error_type == "error_prop") %>%
+  group_by(error_type, fcid, material_type) %>%
   nest() %>%
   dplyr::rename(train=data)%>%
   left_join(joint_test %>%
     filter(expected > 0) %>%
-  group_by(error_type) %>%
+  group_by(error_type, fcid, material_type) %>%
   nest() %>%
   dplyr::rename(test=data)) %>%
   mutate(denom = case_when(
@@ -1476,12 +1574,21 @@ metacal_results_train <-  fit_metacal %>%
               dplyr::select(error_type,taxon, .pred))%>% #material_type, fcid
   dplyr::filter(expected > 0) %>%
   mutate(
+  observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
     estimated = .pred,
     predicted = expected.prop * estimated,
-    calibrated = observed.prop / estimated
+    calibrated = observed.prop / estimated,
+    residual = observed.prop / predicted
     )  %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted, calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   dplyr::filter(expected > 0)%>% 
     dplyr::select(!where(is.list))
 
@@ -1497,12 +1604,21 @@ metacal_results_test <- fit_metacal%>%
               dplyr::select(error_type, taxon,  .pred)) %>% #material_type, fcid, 
   dplyr::filter(expected > 0) %>%
   mutate(
+    observed.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(observed.prop),
+    error_type %in% c("error_prop") ~ expit(observed.prop),
+    TRUE ~ observed.prop),
+  expected.prop = case_when(
+    error_type %in% c("error_abs") ~ exp(expected.prop),
+    error_type %in% c("error_prop") ~ expit(expected.prop),
+    TRUE ~ expected.prop),
     estimated = .pred,
     predicted = expected.prop * estimated,
-    calibrated = observed.prop / estimated
+    calibrated = observed.prop / estimated,
+    residual = observed.prop / predicted
     )  %>%
   group_by(sample_id, error_type) %>%
-  mutate_at(vars(predicted, calibrated), ~ . / sum(., na.rm=TRUE) ) %>%
+  mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   dplyr::filter(expected > 0)%>% 
     dplyr::select(!where(is.list))
 
@@ -1519,6 +1635,8 @@ Here we compare the accuracy of the bias estimation procedure by looking at the 
 
 To determine the models predictive ability to new data, we also determine these metrics for a seperate testing set of samples that the model was not trained on.
 
+
+## RA preds
 
 Add Adist
 Add original bias?
@@ -1538,41 +1656,39 @@ fits <- all_fits_train %>%
   mutate(model = model %>%
            str_remove("_results.*$") %>%
            str_remove("NA")) %>%
-  dplyr::select(model, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated, train, calibrated,  error_type ,sample_size) 
+  dplyr::select(model, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated, train, calibrated, residual,  error_type ,sample_size) %>%
+  mutate(model = model %>%
+           str_replace("keras", "Neural Network") %>%
+           str_replace("rf", "Random Forest") %>%
+           str_replace("^lm$", "Linear Regression") %>%
+           str_replace("xg", "XGBOOST Tree") %>%
+           str_replace("lasso", "LASSO Regression"))
 
 # Get RMSE
 model_rmse <- fits %>%
   group_by(model, error_type,  train) %>%
-  rmse(truth = logit(observed.prop), estimate = logit(predicted)) %>%
+  rmse(truth = logit(calibrated), estimate = logit(expected.prop)) %>%
   dplyr::select(RMSE = .estimate, model, error_type, train)
 
 model_anorm <- fits %>%
   group_by(model, error_type, train) %>%
-    summarise(Adist = anorm(observed.prop / expected)) 
+    summarise(Adist = anorm(calibrated / expected.prop)) 
 
 # Visualise fits to data
 gg.train_preds <- fits %>%
   left_join(model_rmse) %>%
   left_join(model_anorm) %>%
-  distinct()%>%
-  mutate(model = model %>%
-           str_replace("keras", "Neural Network") %>%
-           str_replace("rf", "Random Forest") %>%
-           str_replace("^lm$", "Linear Reg (Proportions)") %>%
-           str_replace("xg", "XGBOOST Tree") %>%
-           str_replace("^comp$", "Linear Reg (Ratios)") %>%
-           str_replace("compglm", "LASSO Reg (Ratios)")%>%
-           str_replace("complm", "Linear Reg (Ratios)")) %>%
+  distinct() %>%
   filter(train == "Training set") %>%
-  filter(error_type %in% c("error_clr", "error_alr", "error_abs_clr", "error_prop")) %>%
+  filter(error_type %in% c("error_clr", "error_alr", "error_abs", "error_prop")) %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(predicted), logit(observed.prop), fill = material_type)) +
+  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  coord_fixed() + 
+    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+#  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+ # coord_fixed() + 
   facet_grid(error_type~model) +
     base_theme+
   scale_fill_brewer(palette="Set1") +
@@ -1581,8 +1697,8 @@ gg.train_preds <- fits %>%
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom",
         legend.text = element_text(face="italic")) +
-    labs(x = "Bias model prediction (log-odds)", 
-        y = "Observed proportions (log-odds)",
+    labs(x = "Calibrated proportions (log-odds)", 
+        y = "Expected proportions (log-odds)",
         fill = "Taxon", 
         colour= NULL,
         title= "Training set")
@@ -1593,24 +1709,16 @@ gg.train_preds
 gg.test_preds <- fits %>%
   left_join(model_rmse) %>%
   left_join(model_anorm) %>%
-  mutate(model = model %>%
-           str_replace("keras", "Neural Network") %>%
-           str_replace("rf", "Random Forest") %>%
-           str_replace("^lm$", "Linear Reg (Proportions)") %>%
-           str_replace("xg", "XGBOOST Tree") %>%
-           str_replace("^comp$", "Linear Reg (Ratios)") %>%
-           str_replace("compglm", "LASSO Reg (Ratios)")%>%
-           str_replace("complm", "Linear Reg (Ratios)")) %>%
   filter(train == "Test set") %>%
-  filter(error_type %in% c("error_clr", "error_alr", "error_abs_clr", "error_prop")) %>%
+  filter(error_type %in% c("error_clr", "error_alr", "error_abs", "error_prop")) %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(predicted), logit(observed.prop), fill = material_type)) +
+  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  coord_fixed() + 
+    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+ # geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #coord_fixed() + 
   facet_grid(error_type~model) +
     base_theme+
   scale_fill_brewer(palette="Set1") +
@@ -1619,39 +1727,30 @@ gg.test_preds <- fits %>%
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom",
         legend.text = element_text(face="italic")) +
-    labs(x = "Bias model prediction (log-odds)", 
-        y = "Observed proportions (log-odds)",
+    labs(x = "Calibrated proportions (log-odds)", 
+        y = "Expected proportions (log-odds)",
         fill = "Taxon", 
         colour= NULL,
         title= "Testing set")
 
 gg.test_preds
 
-# Predictions for just CLR across the different material types
-  
+# Predictions for just ABS across the different material types
 # Visualise fits to data
 gg.material_pred_train <- fits %>%
   left_join(model_rmse) %>%
   left_join(model_anorm) %>%
   distinct()%>%
-  mutate(model = model %>%
-           str_replace("keras", "Neural Network") %>%
-           str_replace("rf", "Random Forest") %>%
-           str_replace("^lm$", "Linear Reg (Proportions)") %>%
-           str_replace("xg", "XGBOOST Tree") %>%
-           str_replace("^comp$", "Linear Reg (Ratios)") %>%
-           str_replace("compglm", "LASSO Reg (Ratios)")%>%
-           str_replace("complm", "Linear Reg (Ratios)")) %>%
   filter(train == "Training set") %>%
-  filter(error_type =="error_clr") %>%
+  filter(error_type =="error_abs") %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(predicted), logit(observed.prop), fill = material_type)) +
+  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  coord_fixed() + 
+    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+#  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+ # coord_fixed() + 
   facet_grid(material_type~model) +
     base_theme+
   scale_fill_brewer(palette="Set1") +
@@ -1671,24 +1770,16 @@ gg.material_pred_test <- fits %>%
   left_join(model_rmse) %>%
   left_join(model_anorm) %>%
   distinct()%>%
-  mutate(model = model %>%
-           str_replace("keras", "Neural Network") %>%
-           str_replace("rf", "Random Forest") %>%
-           str_replace("^lm$", "Linear Reg (Proportions)") %>%
-           str_replace("xg", "XGBOOST Tree") %>%
-           str_replace("^comp$", "Linear Reg (Ratios)") %>%
-           str_replace("compglm", "LASSO Reg (Ratios)")%>%
-           str_replace("complm", "Linear Reg (Ratios)")) %>%
   filter(train == "Test set") %>%
-  filter(error_type =="error_clr") %>%
+  filter(error_type =="error_abs") %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(predicted), logit(observed.prop), fill = material_type)) +
+  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  coord_fixed() + 
+    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+#  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #coord_fixed() + 
   facet_grid(material_type~model) +
     base_theme+
   scale_fill_brewer(palette="Set1") +
@@ -1711,11 +1802,19 @@ pdf(file="fig/bias_preds.pdf", width = 11, height = 8 , paper="a4r")
   plot(gg.material_pred_train)
   plot(gg.material_pred_test)
 try(dev.off(), silent=TRUE)
+  
+# Plot residuals by sample
+fits %>%
+  ggplot(aes(x  = sample_id, y = residual)) +
+  geom_col() + 
+  facet_grid(model~.) +
+  base_theme
+  
 ```
 
 ## Abs preds
 
-```{r}
+```{r absolute abundance predictions}
 all_fits_train <- do.call("list",mget(grep("results_train",names(.GlobalEnv),value=TRUE))) %>%
   bind_rows(.id="model") %>%
   distinct()
@@ -1730,10 +1829,16 @@ abs_fits <- all_fits_train %>%
   mutate(model = model %>%
            str_remove("_results.*$") %>%
            str_remove("NA")) %>%
-  dplyr::select(model, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated,calibrated, train, error_type ,sample_size) %>%
+  dplyr::select(model, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated, calibrated, train, error_type ,sample_size) %>%
   mutate(predicted_abs = predicted * sample_size,
          observed_abs = observed.prop * sample_size,
-         calibrated_abs = calibrated * sample_size)
+         calibrated_abs = calibrated * sample_size)%>%
+  mutate(model = model %>%
+           str_replace("keras", "Neural Network") %>%
+           str_replace("rf", "Random Forest") %>%
+           str_replace("^lm$", "Linear Regression") %>%
+           str_replace("xg", "XGBOOST Tree") %>%
+           str_replace("lasso", "LASSO Regression"))
 
 # Get RMSE
 model_rmse <- abs_fits %>%
@@ -1756,16 +1861,16 @@ gg.train_abs <- abs_fits %>%
            str_replace("^lm$", "Linear Reg (Proportions)") %>%
            str_replace("xg", "XGBOOST Tree") %>%
            str_replace("^comp$", "Linear Reg (Ratios)") %>%
-           str_replace("compglm", "LASSO Reg (Ratios)")%>%
+           str_replace("lasso", "LASSO Reg (Ratios)")%>%
            str_replace("complm", "Linear Reg (Ratios)")) %>%
   filter(train == "Training set") %>%
-  filter(error_type %in% c("error_clr", "error_alr", "error_abs_clr")) %>%
+  filter(error_type %in% c("error_clr", "error_alr",  "error_prop", "error_abs")) %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
   ggplot(aes(calibrated_abs, expected, fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-  geom_text(aes(x=0, y=300, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+#  geom_text(aes(x=0, y=300, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   geom_text(aes(x=0, y=280, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   coord_fixed() + 
   facet_grid(error_type~model) +
@@ -1795,17 +1900,17 @@ gg.test_abs <- abs_fits %>%
            str_replace("^lm$", "Linear Reg (Proportions)") %>%
            str_replace("xg", "XGBOOST Tree") %>%
            str_replace("^comp$", "Linear Reg (Ratios)") %>%
-           str_replace("compglm", "LASSO Reg (Ratios)")%>%
+           str_replace("lasso", "LASSO Reg (Ratios)")%>%
            str_replace("complm", "Linear Reg (Ratios)")) %>%
   filter(train == "Test set") %>%
-  filter(error_type %in% c("error_clr", "error_alr", "error_abs_clr")) %>%
+  filter(error_type %in% c("error_clr", "error_alr", "error_prop", "error_abs")) %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
   ggplot(aes(calibrated_abs, expected, fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
   geom_text(aes(x=0, y=300, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=0, y=280, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+ # geom_text(aes(x=0, y=280, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   coord_fixed() + 
   facet_grid(error_type~model) +
     base_theme+
@@ -1823,7 +1928,11 @@ gg.test_abs <- abs_fits %>%
 
 gg.test_abs
 
-
+#Save figure
+pdf(file="fig/abs_preds.pdf", width = 11, height = 10 , paper="a4r")
+  plot(gg.train_abs)
+  plot(gg.test_abs)
+try(dev.off(), silent=TRUE)
 ```
 
 ## How well do the estimated bias recover the Relative abundances
