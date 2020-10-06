@@ -1,9 +1,32 @@
 #Create safe predict function
 safe_predict <- function(model,data){
-  if(is.null(data) | is(model, "data.frame") ){
+  if(is.null(data) | is.null(model) | is(model, "data.frame") ){
     return(NULL)
   }
-  predict(model, data)
+  out <- tryCatch(
+    {
+      predict(model, data)
+    },
+    error=function(e) {
+      # Choose a return value in case of error
+      return(NULL)
+    }
+  )    
+  return(out)
+}
+
+# Safe fit
+safe_fit <- function(model, data) {
+  out <- tryCatch(
+    {
+     fit(model, data)
+    },
+    error=function(e) {
+      # Choose a return value in case of error
+      return(NULL)
+    }
+  )    
+  return(out)
 }
 
 
