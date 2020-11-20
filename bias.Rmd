@@ -82,7 +82,6 @@ source("R/helper_functions.R")
 
 ## Make Phyloseq object
 
-
 ```{r create PS, eval = FALSE}
 seqtab <- readRDS("output/rds/seqtab_final.rds")
 
@@ -99,23 +98,7 @@ names(seqs) <- seqs
 phy <- read.tree("output/ultrametric_tree_order_constrained.nwk")
 
 ##### Rename problematic samples
-#Could do this with the new dplyr functionality
 rownames(seqtab)  <- rownames(seqtab) %>%
- str_replace_all("D250M1-", "D250M4REP-") %>% # Works
- str_replace_all("D250M4-", "D250M2REP-") %>% # Works
- str_replace_all("D250M5-", "D250M3REP-") %>% #FAILED library
- str_replace_all("D250M3-", "D250M1REP-") %>% #FP suzukii - low reads
- str_replace_all("D250M2-", "D250M5REP-") %>% #Works
- str_replace_all("D500M1-", "D500M4REP-") %>% #Works 
- str_replace_all("D500M4-", "D500M1REP-") %>% #FP Suzukii
- str_replace_all("D500M5-", "D500M2REP-") %>% #Works
- str_replace_all("D500M3-", "D500M3REP-") %>% #Works but low reads for Suz + Biarmipes 
- str_replace_all("D500M2-", "D500M5REP-") %>% #Works
- str_replace_all("D1000M1-", "D1000M3REP-") %>% #Works
- str_replace_all("D1000M4-", "D1000M1REP-") %>% #Works
- str_replace_all("D1000M5-", "D1000M2REP-") %>% #Works
- str_replace_all("D1000M3-", "D1000M5REP-") %>% #Works
- str_replace_all("D1000M2-", "D1000M4REP-") %>% #Works
  str_replace_all("CM10-", "CM9REP-") %>%
  str_replace_all("CM11-", "CM10REP-") %>%
  str_replace_all("CM9-", "CM11REP-") %>%
@@ -130,7 +113,6 @@ str_replace_all("REP", "")
 
 
 # Samdf processing --------------------------------------------------------
-
 samdf <- read.csv("sample_data/sample_info.csv", header=TRUE) %>% 
   mutate(sample_id = case_when(
     fcid=="HLVKYDMXX" ~ paste0(sample_name, "_", amp_rep),
@@ -189,90 +171,227 @@ taxa_names(ps) <- paste0("SV", seq(ntaxa(ps)),"-",tax_table(ps)[,8])
 
 saveRDS(ps, "output/rds/ps_idtaxaExact.rds") 
 
-#Rename synthetic orders
-tax_table(ps)[,2][which(str_detect(tax_table(ps)[,8], "Synthetic"))] <- "Arthropoda"
+#Rename synthetic spike ins
+tax_table(ps)[,3][which(str_detect(tax_table(ps)[,8], "Synthetic"))] <- "Arthropoda"
 
-#Subsetto Carpophilus
+# Rename incorrectly named taxa
+tax_table(ps)[,8][which(tax_table(ps)[,8]=="Carpophilus dimidiatus/nr.dimidiatus")] <- "Carpophilus nr.dimidiatus"
+tax_table(ps)[,8][which(tax_table(ps)[,8]=="Brachypeplus Sp1")] <- "Brachypeplus Sp"
+tax_table(ps)[,8][which(tax_table(ps)[,8]=="Brachypeplus Sp2")] <- "Brachypeplus Sp"
+
+#Subset full dataset to Carpophilus samples of interest
 ps <- ps %>%
-  subset_samples(str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]")
-  ) %>%
-  filter_taxa( function(x) mean(x) > 0, TRUE) 
+  subset_taxa(
+    Phylum == "Arthropoda" &
+    !Order == "Synthetic"
+    )%>%
+  subset_samples(str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]")) %>%
+  subset_samples(type %in% c("CarpMock",  "CarpTrap", "CarpLarval")) %>%
+  subset_samples(pcr_primers == "fwhF2-fwhR2n") %>%
+  subset_samples(fcid %in% c("HLVKYDMXX", "CB3DR")) %>%
+  filter_taxa( function(x) mean(x) > 0, TRUE) %>%
+  speedyseq::tax_glom(taxrank="Species") # Agglomerate to species
+
 dir.create("output/csv")
 dir.create("output/csv/unfiltered/")
 
-##Export raw csv
+# Export raw csv
 export <- speedyseq::psmelt(ps) %>%
   filter(Abundance > 0)
 write.csv(export, file = "output/csv/rawdata.csv")
 
-#Summary export
+# Summary export
 seqateurs::summarise_taxa(ps, "Species", "sample_name") %>%
   filter(!str_detect(sample_name, "NTC")) %>%
   spread(key="sample_name", value="totalRA") %>%
+  filter(!str_detect(Species, "__")) %>%
   write.csv(file = "output/csv/unfiltered/spp_sum.csv")
 
 seqateurs::summarise_taxa(ps, "Genus", "sample_name") %>%
   spread(key="sample_name", value="totalRA") %>%
+  filter(!str_detect(Genus, "__")) %>%
   write.csv(file = "output/csv/unfiltered/gen_sum.csv")
 
-##Output fasta of all ASV's - Name each one by abundance + taxonomic assignment
-seqateurs::ps_to_fasta(ps, "output/all_taxa.fasta")
+# Species detection summary
+speedyseq::psmelt(ps) %>%
+  filter(!str_detect(Genus, "__"), Abundance > 0 ) %>%
+  mutate(abundance_ra = Abundance) %>%
+  group_by(sample_id, fcid) %>%
+  mutate_at(vars(abundance_ra), ~ . / sum(., na.rm = TRUE) ) %>%
+  ungroup() %>%
+  group_by(Species) %>%
+  summarise(total_reads = sum(Abundance), mean_ra = mean(abundance_ra, na.rm=TRUE))%>%
+  write.csv(file = "output/csv/unfiltered/detection_summary.csv")
+
+
+# Output fasta of all ASV's - Name each one by abundance + taxonomic assignment
+seqateurs::ps_to_fasta(ps, "output/all_taxa.fasta", seqnames = "Species")
+```
+
+## Minimum read filtering
+
+```{r minimum reads}
+#Plot rarefaction curve
+rare <- otu_table(ps) %>%
+  as("matrix") %>%
+  rarecurve(step=10000) %>%
+  purrr::map_dfr(., function(x){
+  b <- as.data.frame(x)
+  b <- data.frame(OTU = b[,1], count = rownames(b))
+  b$count <- as.numeric(gsub("N", "",  b$count))
+  nm <- names(attr(x, "Subsample"))
+  b$sample_id <- nm[!nm==""]
+  return(b)
+  })%>%
+  left_join(sample_data(ps)%>%
+    as("matrix") %>%
+    as_tibble() %>%
+      dplyr::select(sample_id, fcid) %>%
+      distinct())%>%
+  dplyr::filter(fcid %in% c("CB3DR", "HLVKYDMXX"))
+
+# threshold for read removal
+threshold = 1000
+
+gg.rare <- rare %>%
+  ggplot() +
+  geom_line(aes(x = count, y = OTU, group=sample_id), alpha=0.5)+
+  geom_point(data = rare %>% 
+               group_by(sample_id) %>% 
+               top_n(1, count),
+             aes(x = count, y = OTU, colour=(count > threshold))) +
+  scale_x_log10(labels =  scales::label_number_si()) +
+  geom_vline(xintercept=threshold, linetype="dashed") +
+  facet_wrap(fcid~., scales="free", ncol=1)+
+  base_theme+
+  theme(legend.position = "bottom")+
+  labs(x = "Sequence reads",
+       y = "Observed ASV's",
+       colour = "Sample retained?")
+gg.rare
+
+#Write out figure
+pdf(file="fig/supplementary/rarefaction.pdf", width = 8, height = 6 , paper="a4r")
+  plot(gg.rare)
+try(dev.off(), silent=TRUE)
+
+#Remove all samples under the minimum read threshold 
+ps1 <- prune_samples(sample_sums(ps)>=threshold, ps) 
+ps1 <- filter_taxa(ps1, function(x) mean(x) > 0, TRUE) #Drop missing taxa from table
+message(nsamples(ps) - nsamples(ps1), " Samples and ", ntaxa(ps) - ntaxa(ps1), " taxa under read threshold Dropped")
+
+# Check which were dropped
+setdiff(sample_names(ps), sample_names(ps1))
 ```
 
 
 ### Summary statistics
 
 ```{r sum taxa}
+exp_samples <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
+  dplyr::rename(sample_name = X1) %>%
+  pivot_longer(-sample_name,
+               names_to= "taxon",
+               values_to= "expected") %>%
+  mutate(taxon = str_replace(taxon, pattern=" ",replacement="_"),
+         sample_name = str_remove(sample_name, "-exp*.$")) %>%
+  dplyr::filter(!is.na(sample_name),
+  str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]"),
+  expected > 0) %>%
+  distinct()
+
+summary_dat <- speedyseq::psmelt(ps1) %>%
+  filter(Abundance > 0 ) %>%
+  dplyr::select(OTU, Sample, Abundance, sample_id, sample_name, extract_id, fcid, rank_names(ps1), type) %>%
+  mutate(Genus = case_when(
+    str_detect(Genus, "__") ~ as.character(NA),
+    TRUE  ~ Species
+  )) %>%
+  mutate(Species = case_when(
+    str_detect(Species, "__") ~ as.character(NA),
+    TRUE ~ Species
+  )) %>%
+  mutate(abundance_ra = Abundance) %>%
+  group_by(sample_id, fcid) %>%
+  mutate_at(vars(abundance_ra), ~ . / sum(., na.rm = TRUE) ) %>%
+  ungroup() %>% 
+  mutate(above_thresh = case_when(
+    abundance_ra < 1e-4 ~ FALSE,
+    TRUE ~ TRUE
+    )) %>%
+  mutate(mock_spp = case_when(
+    str_replace(Species, " ", "_") %in% exp_samples$taxon ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+summary_dat%>%
+  group_by(mock_spp) %>%
+  summarise(n_extracts = n_distinct(extract_id), n_samples = n_distinct(sample_id),
+            n_asv = n_distinct(OTU), n_spp = n_distinct(Species), n_genus = n_distinct(Genus))
+
+summary_dat %>%
+  filter(above_thresh, !str_detect(Species, "__")) %>%
+  dplyr::select(Species, Order) %>%
+  distinct() %>%
+  pull(Order) %>%
+  length()
+  
+  
 # N unique species and samples
-speedyseq::psmelt(ps) %>%
-  summarise(n_extracts = n_distinct(sample_name), n_samples = n_distinct(sample_name))
+summary_dat %>%
+  summarise(n_extracts = n_distinct(extract_id), n_samples = n_distinct(sample_name), n_reps = n_distinct(sample_id))
+
 
 # Spread of reads
-speedyseq::psmelt(ps) %>%
-  group_by(sample_name) %>%
+summary_dat %>%
+  group_by(extract_id, fcid) %>%
   summarise(Abundance = sum(Abundance)) %>%
   ungroup() %>%
+  group_by(fcid) %>%
   summarise(mean = mean(Abundance), 
             se = sd(Abundance)/sqrt(length(Abundance)),
             max = max(Abundance),
-            min = min(Abundance))
+            min = min(Abundance),
+            total = sum(Abundance))
 
-# Spread of ASVs
-speedyseq::psmelt(ps) %>%
-  group_by(sample_name) %>%
+# Spread of ASVs across samples - Add a grouping variable if they were in the mock communities, as well as if they were below 1e-4RA
+ps1 %>%
+
+  group_by(extract_id, fcid) %>%
   dplyr::filter(Abundance > 0) %>%
   summarise(counts = n_distinct(OTU)) %>%
   ungroup() %>%
+  group_by(fcid) %>%
   summarise(mean = mean(counts), 
             se = sd(counts)/sqrt(length(counts)),
             max = max(counts),
             min = min(counts))
 
 #Fraction of reads assigned to each taxonomic rank
-speedyseq::psmelt(ps) %>%
-  gather("Rank","Name", rank_names(ps)) %>%
+speedyseq::psmelt(ps1) %>%
+  gather("Rank","Name", rank_names(ps1)) %>%
   group_by(Rank) %>% 
   mutate(Name = replace(Name, str_detect(Name, "__"), NA)) %>% # This line turns the "__" we added to lower ranks back to NA's
   dplyr::summarise(Reads_classified = sum(Abundance * !is.na(Name))) %>%
-  mutate(Frac_reads = Reads_classified / sum(sample_sums(ps))) %>%
-  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  mutate(Frac_reads = Reads_classified / sum(sample_sums(ps1))) %>%
+  mutate(Rank = factor(Rank, rank_names(ps1))) %>%
   arrange(Rank)
 
 #Fraction of ASV's assigned to each taxonomic rank
-tax_table(ps) %>%
+tax_table(ps1) %>%
   as("matrix") %>%
   as_tibble(rownames="OTU") %>%
-  gather("Rank","Name",rank_names(ps)) %>%
+  gather("Rank","Name",rank_names(ps1)) %>%
   group_by(Rank) %>%
   mutate(Name = replace(Name, str_detect(Name, "__"), NA)) %>% # This line turns the "__" we added to lower ranks back to NA's
   dplyr::summarise(OTUs_classified = sum(!is.na(Name))) %>%
-  mutate(Frac_OTUs = OTUs_classified / ntaxa(ps)) %>%
-  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  mutate(Frac_OTUs = OTUs_classified / ntaxa(ps1)) %>%
+  mutate(Rank = factor(Rank, rank_names(ps1))) %>%
   arrange(Rank)
 
 # Unique taxa at each rank
-speedyseq::psmelt(ps) %>%
-  dplyr::select(rank_names(ps)) %>%
+speedyseq::psmelt(ps1) %>%
+  dplyr::select(rank_names(ps1)) %>%
   pivot_longer(everything(),
                names_to = "Rank",
                values_to = "value") %>%
@@ -283,60 +402,142 @@ speedyseq::psmelt(ps) %>%
   drop_na() %>%
   group_by(Rank) %>%
   summarise_all(list(n_distinct)) %>%
-  mutate(Rank = factor(Rank, rank_names(ps))) %>%
+  mutate(Rank = factor(Rank, rank_names(ps1))) %>%
   arrange(Rank)
+
 ```
 
-## Taxon filtering
+# Taxon filtering
 
-```{R taxon filt}
-get_taxa_unique(ps, "Order")
+```{r}
+get_taxa_unique(ps1, "Order")
+ps1 # Check the number of taxa prior to removal
 
-ps # Check the number of taxa prior to removal
-ps0 <- ps %>%
-  subset_taxa(
-    Phylum == "Arthropoda" & 
-    Class %in% c("Insecta", "Arachnida", "Collembola")
-  )
-ps # Confirm that the taxa were removed
-get_taxa_unique(ps0, "Phylum")
-get_taxa_unique(ps0, "Class")
-get_taxa_unique(ps0, "Order")
+tax_to_keep <- exp_samples$taxon %>%
+  unique() %>%
+  str_replace("_", " ")
+
+tax_to_keep[!tax_to_keep %in% as(tax_table(ps1),"data.frame")$Species]
+
+ps2 <- ps1 %>%
+  subset_taxa(Species %in% tax_to_keep)
+
+# Summary after filtering 
+
+
+# Spread of reads
+ps2 %>%
+  speedyseq::psmelt()%>%
+  group_by(extract_id, fcid) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  ungroup() %>%
+  group_by(fcid) %>%
+  summarise(mean = mean(Abundance), 
+            se = sd(Abundance)/sqrt(length(Abundance)),
+            max = max(Abundance),
+            min = min(Abundance),
+            total = sum(Abundance))
 ```
 
 
-## Merge replicates 
 
-```{r merge replicates}
-# Merge replicates
-ps.merged <- ps0 %>%
-    merge_samples(group = "sample_name", fun="sum")
+## Success of replicates
 
-#This loses the sample metadata - Need to add it agian
-sample_data(ps.merged) <- sample_data(ps0) %>%
-  as("data.frame") %>%
-  dplyr::filter(!duplicated(sample_name)) %>%
-  magrittr::set_rownames(.$sample_name)
+```{r rep success }
+exp_samples <- read_csv("data/HLVKYDMXX/SampleSheet.csv", skip = 19) %>%
+  dplyr::select(extract_id = Sample_Name, sample_name = Sample_Name) %>%
+  group_by(extract_id) %>%
+  #group_split() %>%
+  group_modify(~{
+    .x %>%
+      dplyr::slice(rep(1:n(), each=3)) %>%
+      mutate(amp_rep = row_number()) %>%
+      mutate(sample_id = paste0(sample_name, "_", amp_rep))
+  }) %>%
+  ungroup() %>%
+  mutate(sample_name = extract_id %>%
+           str_remove("-ex[0-9]$"))%>%
+  mutate(type = case_when(
+    str_detect(sample_id, "D[0-9][0-9][0-9]M|D[0-9][0-9][0-9][0-9]M|DM[0-9]")  ~ "DrosMock",
+    str_detect(sample_id, "SPD")  ~ "SPD",
+    str_detect(sample_id, "ACV")  ~ "ACV",
+    str_detect(sample_id, "DC")  ~ "DC",
+    str_detect(sample_id, "Sach")  ~ "Sachet",
+    str_detect(sample_id, "FF")  ~ "FF",
+    str_detect(sample_id, "NTC")  ~ "NTC",
+    str_detect(sample_id, "DLarv")  ~ "DrosLarv",
+    str_detect(sample_id, "POS|SynMock")  ~ "POS",
+    str_detect(sample_id, "extblank|BLANK")  ~ "Extblank",
+    str_detect(sample_id, "pcrblank")  ~ "PCRblank",
+    str_detect(sample_id, "CT")  ~ "CarpTrap",
+    str_detect(sample_id, "CM[0-9]")  ~ "CarpMock",
+    str_detect(sample_id, "CML[0-9]")  ~ "CarpLarval"
+  )) %>%
+  filter(type %in% c("CarpMock", "CarpLarval", "CarpTrap"))
 
-ps1 <- ps.merged
+# Heatmap of abundance of pcr replicates
+rep_data <- exp_samples %>%
+  left_join(ps2 %>% 
+  speedyseq::psmelt() %>%
+    filter(Abundance > 0) %>%
+    group_by(sample_name, extract_id, sample_id, amp_rep, fcid, type) %>%
+    summarise(Abundance = sum(Abundance), n_spp = n_distinct(Species)) %>%
+    ungroup()) %>%
+  mutate(extrep = extract_id %>% str_extract("ex.*$")) %>%
+  #filter(!(extrep=="ex1" & amp_rep == 2)) %>%
+  mutate(amp_rep = factor(amp_rep)) %>%
+  mutate(extrep = extrep %>% str_replace("ex", "Extraction Rep ")) %>%
+  filter(amp_rep %in% 1:3)
+
+# Summarise of replicate success
+rep_data %>%
+  ungroup() %>%
+  mutate(success = case_when(
+    Abundance > 0 ~ TRUE,
+    Abundance == 0 | is.na(Abundance) ~ FALSE
+  )) %>%
+  group_by(type) %>%
+  summarise(sum=sum(success), total = n()) %>%
+  mutate(proportion = sum / total)
+
+# Summary of sample success
+rep_data %>%
+  ungroup() %>%
+  group_by(sample_name, type) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE))%>%
+  ungroup() %>%
+  mutate(success = case_when(
+    Abundance > 0 ~ TRUE,
+    Abundance == 0 | is.na(Abundance) ~ FALSE
+  )) %>%
+  group_by(type) %>%
+  summarise(sum=sum(success), total = n()) %>%
+  mutate(proportion = sum / total)
+
+
+gg.repmap <- rep_data %>%
+   ggplot(aes(x = amp_rep, y = sample_name, fill = n_spp)) +
+  geom_tile()+
+  scale_fill_viridis_c()+
+  facet_grid(extrep~type, scales="free", space="free", drop=TRUE)+
+  base_theme+
+  scale_x_discrete(expand=c(0,0))+
+  scale_y_discrete(expand=c(0,0))+
+  coord_flip()+
+  theme(legend.position = "right")+
+  labs(x = "PCR Replicate",
+       y = NULL,
+       fill = "N Species")
+gg.repmap
 ```
 
+# Fig2 - Error consistency
 
-# Get expected and observed across all runs
+Look at bias consistency between replicates
 
+# Visualise errors between samples & reps
 
-```{r make joint}
-ps_bias <- ps1 %>%
-  subset_samples(type %in% c("CarpMock",  "CarpTrap", "CarpLarval")) %>%
-  subset_samples(fcid %in% c("HLVKYDMXX", "CB3DR")) %>%
-  subset_samples(pcr_primers == "fwhF2-fwhR2n") %>%
-  filter_taxa( function(x) mean(x) > 0, TRUE) 
-
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Carpophilus_dimidiatus/nr.dimidiatus")] <- "Carpophilus_nr.dimidiatus"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp1")] <- "Brachypeplus_Sp"
-tax_table(ps_bias)[,7][which(tax_table(ps_bias)[,7]=="Brachypeplus_Sp2")] <- "Brachypeplus_Sp"
-ps_bias <- speedyseq::tax_glom(ps_bias, taxrank="Species")
-
+```{r Consistency between reps}
 exp <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
   dplyr::rename(sample_name = X1) %>%
   pivot_longer(-sample_name,
@@ -348,6 +549,175 @@ exp <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
   str_detect(sample_name, "CM[0-9]|CT[0-9]|CML[0-9]"),
   expected > 0) %>%
   distinct()
+
+#Get obsered
+sam <- speedyseq::psmelt(ps2) %>%
+  janitor::clean_names() %>%
+  filter(!str_detect(species, "__")) %>%#Remove unclassified
+  mutate(taxon = species %>% str_replace(" ", "_")) %>%
+  dplyr::select(sample_name, extract_id, taxon, abundance, amp_rep, pcr_primers, fcid, material_type = type) %>%
+  mutate(sample_name = sample_name %>%
+           str_remove_all("BF1-BR1-|SauronS878-HexCOIR4-|fwhF2-HexCOIR4-|fwhF2-fwhR2n-") %>%
+           str_remove("HLVKYDMXX_") %>%
+           str_remove("CB3DR_"),
+         sample_id = paste0(fcid, "_", sample_name),
+         sample_name = sample_name %>%
+           str_remove("-ex[0-9]")) %>%
+  mutate(extrep = extract_id %>% str_extract("ex.*$")) %>%
+  #filter(!(extrep=="ex1" & amp_rep == 2)) %>%
+  mutate(amp_rep = factor(amp_rep)) %>%
+  mutate(extrep = extrep %>% str_replace("ex", "Extraction Rep ")) %>%
+  filter(amp_rep %in% 1:3)
+
+#Join tables 
+joint <- sam %>%
+  filter(taxon %in% exp$taxon,
+         sample_name %in% exp$sample_name) %>%
+  left_join(exp, by = c("sample_name","taxon")) %>%
+  dplyr::rename(observed = abundance) %>%
+  filter(!is.na(expected))%>%
+  mutate(expected = replace_na(expected, 0),
+         observed0 = (observed + 0.5) * (expected > 0),
+         error = observed0 / expected,
+         #error_centre = center_elts(observed0 / expected, na.rm = TRUE),
+         ) %>%
+  distinct() %>%
+  group_by(sample_id) %>%
+  mutate(observed.prop=observed, expected.prop=expected) %>%
+  mutate_at(vars(observed.prop,  expected.prop), ~ . / sum(.) ) %>% #Convert to proportions
+  mutate(sample_size = sum(expected), # Do the same for the ratios?
+         observed_abs = observed.prop * sample_size,
+         error_abs = observed_abs / expected,
+         error_prop = observed.prop / expected.prop
+         )%>%
+  filter(!sample_id=="HLVKYDMXX_CML6") 
+
+# Original errors
+error_rmse <- joint %>%
+  group_by(extrep, amp_rep) %>%
+  rmse(truth = expected.prop, estimate = observed.prop) %>%
+  #rmse(truth = logit(expected.prop), estimate = logit(observed.prop)) %>%
+  dplyr::select(RMSE = .estimate, extrep, amp_rep)
+
+error_anorm <- joint %>%
+  group_by(material_type) %>%
+    summarise(Adist = anorm(observed.prop / expected)) 
+
+## Visualise errors in proportions
+gg.error_props <- joint %>% 
+  filter(expected > 0) %>%
+  #mutate_at(vars(expected.prop, observed.prop), logit) %>%
+  left_join(error_rmse) %>%
+  left_join(error_anorm) %>%
+  mutate(extrep = replace_na(extrep, "MiSeq")) %>%
+  ggplot(aes(expected.prop, observed.prop, fill = taxon)) + 
+  geom_abline(intercept = 0, slope=1) +
+  geom_point(alpha=0.7, shape=21, colour="black", ) +
+  geom_text(aes(x=0, y=0.9, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(extrep~amp_rep)+
+  scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  #scale_x_continuous(labels=scales::percent)+
+  #scale_y_continuous(labels = scales::percent)+
+   # coord_fixed() + 
+  base_theme+
+  theme(legend.position="right")+
+  labs(fill = "Taxon",
+       x="Expected proportions",
+       y="Observed proportions") 
+
+gg.error_props
+
+# Deviation in taxon specific errors between samples
+error_variation <- joint %>% 
+  filter(fcid == "HLVKYDMXX")%>%
+  group_by(taxon)%>%
+  group_modify(~{
+    amp_err <- .x %>%
+      group_by(extract_id) %>%
+      add_tally()  %>%
+      filter(n > 1) %>%
+      summarise(error_prop = mean(error_prop)) %>%
+      mutate(type = "PCR")%>%
+      dplyr::select(-extract_id)
+    
+    ext_err  <- .x %>%
+      group_by(extract_id,sample_name, fcid) %>%
+      summarise(error_prop = mean(error_prop)) %>%
+      ungroup() %>%
+      mutate(sample_fcid = paste0(fcid, sample_name)) %>%
+      group_by(sample_fcid) %>% 
+      add_tally()  %>%
+      filter(n > 1) %>%
+      summarise(error_prop = mean(error_prop)) %>%
+      mutate(type = "Extraction") %>%
+      dplyr::select(-sample_fcid)
+    
+    samp_err  <- .x %>%
+      mutate(sample_fcid = paste0(fcid, sample_name)) %>%
+      group_by(sample_fcid) %>% 
+      summarise(error_prop = mean(error_prop)) %>%
+      ungroup() %>%
+      mutate(type = "Sample") %>%
+      dplyr::select(-sample_fcid)
+    
+    out <- bind_rows(amp_err, ext_err, samp_err)
+    return(out)
+  })
+
+gg.err_var <- error_variation %>%
+  ggplot(aes(x = type, y = error_prop, colour=taxon,fill=taxon, group=type))+
+  geom_boxplot(fill=NA, outlier.colour = NA)+ 
+  geom_point(alpha=0.7, shape=21, colour="black",position = position_jitter(width=0.2) ) +
+  scale_color_brewer(palette = "Paired")+
+  scale_fill_brewer(palette = "Paired")+
+  facet_grid(~taxon) +
+  scale_y_continuous(trans=pseudo_log_trans(1e-1))+
+  base_theme +
+  theme(
+    strip.text = element_blank(),
+    legend.position = "none"
+  )+
+  labs(y="Error in Proportions",
+       x = NULL)
+
+
+Fig2 <- gg.error_props /gg.err_var + plot_layout(heights = c(3,1)) + plot_annotation(tag_levels = "A")
+
+Fig2
+
+#Save figure
+pdf(file="fig/fig2_error_consistency.pdf", width = 10, height = 8 , paper="a4r")
+  plot(Fig2)
+try(dev.off(), silent=TRUE)
+
+```
+
+
+## Merge replicates 
+
+```{r merge replicates}
+# Merge replicates
+ps.merged <- ps2 %>%
+    merge_samples(group = "sample_name", fun="sum")
+
+#This loses the sample metadata - Need to add it agian
+sample_data(ps.merged) <- sample_data(ps2) %>%
+  as("data.frame") %>%
+  dplyr::filter(!duplicated(sample_name)) %>%
+  magrittr::set_rownames(.$sample_name)
+
+ps3 <- ps.merged
+```
+
+
+# Get expected and observed across all runs
+
+
+```{r make joint}
+ps_bias <- ps3
 
 #plot expected
 exp %>% 
@@ -365,12 +735,12 @@ sam <- speedyseq::psmelt(ps_bias) %>%
   janitor::clean_names() %>%
   filter(!str_detect(species, "__")) %>%#Remove unclassified
   mutate(taxon = species %>% str_replace(" ", "_")) %>%
-  dplyr::select(sample_name, taxon, abundance, pcr_primers, fcid, material_type = type) %>%
+  dplyr::select(sample_name,sample_id, taxon, abundance, pcr_primers, fcid, material_type = type) %>%
   mutate(sample_name = sample_name %>%
            str_remove_all("BF1-BR1-|SauronS878-HexCOIR4-|fwhF2-HexCOIR4-|fwhF2-fwhR2n-") %>%
            str_remove("HLVKYDMXX_") %>%
            str_remove("CB3DR_"),
-         sample_id = paste0(fcid, "_", sample_name),
+         sample_id = paste0(fcid, "_", sample_name), #Remove this for ps1
          sample_name = sample_name %>%
            str_remove("-ex[0-9]")) 
 
@@ -388,7 +758,7 @@ joint <- sam %>%
          ) %>%
   distinct() %>%
   group_by(sample_id) %>%
-  mutate(observed.prop=observed, expected.prop=expected) %>%
+  mutate(observed.prop=observed0, expected.prop=expected) %>%
   mutate_at(vars(observed.prop,  expected.prop), ~ . / sum(.) ) %>% #Convert to proportions
   mutate(sample_size = sum(expected), # Do the same for the ratios?
          observed_abs = observed.prop * sample_size,
@@ -419,9 +789,10 @@ joint <- sam %>%
       mutate(error_abs_alr = log(error_abs / alr_denom),
              error_abs_clr = log(error_abs / clr_denom))
   })%>%
-  filter(!sample_id=="HLVKYDMXX_CML6") #Bad sample
+  filter(!sample_name=="CML6") #Bad sample
 
 ```
+
 
 # Visualise errors
 
@@ -429,7 +800,7 @@ joint <- sam %>%
 # Original errors
 error_rmse <- joint %>%
   group_by(material_type) %>%
-  rmse(truth = logit(expected.prop), estimate = logit(observed.prop)) %>%
+  rmse(truth = expected.prop, estimate = observed.prop) %>%
   dplyr::select(RMSE = .estimate, material_type)
 
 error_anorm <- joint %>%
@@ -439,7 +810,7 @@ error_anorm <- joint %>%
 ## Visualise errors in proportions
 gg.error_props <- joint %>% 
   filter(expected > 0) %>%
-  mutate_at(vars(expected.prop, observed.prop), logit) %>%
+  #mutate_at(vars(expected.prop, observed.prop), logit) %>%
   left_join(error_rmse) %>%
   left_join(error_anorm) %>%
   ggplot(aes(expected.prop, observed.prop, fill = taxon)) + 
@@ -448,7 +819,9 @@ gg.error_props <- joint %>%
   geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   scale_fill_brewer(palette="Paired")+
-  facet_grid(material_type~fcid)+
+    scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  facet_grid(fcid~material_type)+
     coord_fixed() + 
   theme_bw()+
   labs(fill = "Taxon",
@@ -509,69 +882,81 @@ try(dev.off(), silent=TRUE)
 ```{r splits}
 set.seed(666)
 
-#Sample splits
-joint_split <- joint %>%
-  ungroup() %>%
-  dplyr::select(sample_id, material_type) %>%
-  distinct() %>%
-  initial_split(strata = material_type)
+# Generate a list of 100 seeds
 
-# Training set
-joint_train <- joint %>%
-  dplyr::select(-error) %>%
-  #dplyr::rename(error_rat = error) %>%
-  filter(sample_id %in% training(joint_split)$sample_id) %>%
-  ungroup()%>%
-  pivot_longer(starts_with("error"),
-               names_to="error_type",
-               values_to="error") %>%
-  mutate(observed.prop =case_when(
-    error_type == "error_prop" ~ logit(observed.prop),
-    error_type == "error_abs" ~ log(observed_abs),
-    TRUE ~ observed.prop
-    ),
-    expected.prop = case_when(
-    error_type == "error_prop" ~ logit(expected.prop),
-    error_type == "error_abs" ~ log(expected),
-    TRUE ~ expected.prop
-    ))
+seeds <- sample(1:10000, 100,replace = FALSE)
 
-# Testing set
-joint_test <- joint %>%
-  dplyr::select(-error) %>%
-  #dplyr::rename(error_rat = error) %>%
-  filter(sample_id %in% testing(joint_split)$sample_id)%>%
-  ungroup()%>%
-  pivot_longer(starts_with("error"),
-               names_to="error_type",
-               values_to="error")%>%
-  mutate(observed.prop =case_when(
-    error_type == "error_prop" ~ logit(observed.prop),
-    error_type == "error_abs" ~ log(observed_abs),
-    TRUE ~ observed.prop
-    ),
-    expected.prop = case_when(
-    error_type == "error_prop" ~ logit(expected.prop),
-    error_type == "error_abs" ~ log(expected),
-    TRUE ~ expected.prop
-    ))
+split_list <- vector("list", length=length(seeds))
+for (s in 1:length(seeds)){
 
-# Check for data bleeding
-table(joint_train$sample_id %in% joint_test$sample_id)
-table(joint_test$sample_id %in% joint_train$sample_id)
+  set.seed(seeds[s])
+  #Sample splits
+  joint_split <- joint %>%
+    ungroup() %>%
+    dplyr::select(sample_name, material_type) %>%
+    distinct() %>%
+    initial_split(strata = material_type)
+  
+  # Training set
+  joint_train <- joint %>%
+    dplyr::select(-error) %>%
+    #dplyr::rename(error_rat = error) %>%
+    filter(sample_name %in% training(joint_split)$sample_name) %>%
+    ungroup()%>%
+    pivot_longer(starts_with("error"),
+                 names_to="error_type",
+                 values_to="error") %>%
+    mutate(observed.prop =case_when(
+      error_type == "error_prop" ~ logit(observed.prop),
+      error_type == "error_abs" ~ log(observed_abs),
+      TRUE ~ observed.prop
+      ),
+      expected.prop = case_when(
+      error_type == "error_prop" ~ logit(expected.prop),
+      error_type == "error_abs" ~ log(expected),
+      TRUE ~ expected.prop
+      ))
+  
+  # Testing set
+  joint_test <- joint %>%
+    dplyr::select(-error) %>%
+    #dplyr::rename(error_rat = error) %>%
+    filter(sample_name %in% testing(joint_split)$sample_name)%>%
+    ungroup()%>%
+    pivot_longer(starts_with("error"),
+                 names_to="error_type",
+                 values_to="error")%>%
+    mutate(observed.prop =case_when(
+      error_type == "error_prop" ~ logit(observed.prop),
+      error_type == "error_abs" ~ log(observed_abs),
+      TRUE ~ observed.prop
+      ),
+      expected.prop = case_when(
+      error_type == "error_prop" ~ logit(expected.prop),
+      error_type == "error_abs" ~ log(expected),
+      TRUE ~ expected.prop
+      ))
+  
+  # Check for data bleeding
+  table(joint_train$sample_name %in% joint_test$sample_name)
+  table(joint_test$sample_name %in% joint_train$sample_name)
+  
+  # Create Cross validation folds for model tuning 
+  train_cv <- joint_train %>%
+      mutate(strata = paste0(taxon, "_", material_type)) %>%
+      vfold_cv(v = 10, strata = strata )
 
-# Create Cross validation folds for model tuning 
-train_cv <- joint_train %>%
-    mutate(strata = paste0(taxon, "_", material_type)) %>%
-    vfold_cv(v = 10, strata = strata )
+  
+  
+  split_list[[s]] <- tibble(seed = seeds[s],
+                            train = list(joint_train),
+                            test = list(joint_test),
+                            cv= list(train_cv))
+}
 
-## Nested train cv
-#nested_train_cv <- nested_cv(train_dat, 
-#                     outside = train_cv, 
-#                     inside = bootstraps(times = 25))
-#
-#Note - there is no real difference in results when tuning separately on each type of error - because they are all ratios
-#Only real difference is its slower
+splits <- split_list %>%
+  bind_rows()
+
 ```
 
 ## Uncorrected errors 
@@ -646,8 +1031,8 @@ prop_recipe <- recipe(formula =  expected.prop ~ 0 + observed.prop + taxon + fci
   step_string2factor(taxon) %>% 
   step_novel(all_nominal(), -all_outcomes()) %>% 
   step_dummy(all_nominal(), -all_outcomes(), one_hot=TRUE) %>% 
-  step_zv(all_predictors()) %>%
-  step_naomit()
+  step_zv(all_predictors())  %>%
+  step_naomit(all_predictors())
 
 prop_recipe_separate <- 
   recipe(formula = expected.prop ~ 0 + observed.prop + taxon, data = joint_train) %>% 
@@ -682,6 +1067,46 @@ lm_workflow_prop <-
   workflow() %>% 
   add_recipe(prop_recipe) %>% 
   add_model(lm_spec)
+
+
+# TESTING NEw
+fit_lm <- joint_train %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(train=data)%>%
+  left_join(joint_test %>%
+  filter(expected > 0) %>%
+  group_by(error_type) %>%
+  nest() %>%
+  dplyr::rename(test=data)) %>%
+  left_join(group_keys(.) %>%
+            tidyr::unite("group_names", everything(), sep="-", remove=FALSE)) %>%
+  mutate(
+    model_obj = purrr::map2(train, error_type, function(x,y ){
+      if (!y %in% c("error_prop", "error_abs")){
+        fit(lm_workflow_rat, data=x)
+      } else if(error_type %in% c("error_prop", "error_abs")){
+        fit(lm_workflow_prop, data=x)
+      }
+    }),
+    pred_train = purrr::map2(model_obj, train, ~safe_predict(.x, .y)),
+    pred_test = purrr::map2(model_obj, test, ~safe_predict(.x, .y)),
+    vip = purrr::map2(model_obj, group_names ,~{
+      if(!is(.x, "data.frame")){
+        .x %>%
+        pull_workflow_fit() %>%
+        vip::vip()+
+        labs(title=.y %>% str_remove("error_"))
+      } else{
+        return(NULL)
+      }
+    })
+  )
+
+
+
+
 
 # Fit model to ratios and proportions
 fit_lm <- joint_train %>%
@@ -1294,7 +1719,7 @@ svm_workflow_rat <- workflow() %>%
   add_recipe(bias_recipe) %>% 
   add_model(svm_spec) 
 
-doParallel::registerDoParallel(cores=2)
+#doParallel::registerDoParallel(cores=2)
 set.seed(666)
 svm_tune <-
   tune_grid(svm_workflow_rat, resamples = train_cv, grid =20)
@@ -1835,7 +2260,7 @@ fits <- all_fits_train %>%
 # Get RMSE
 model_rmse <- fits %>%
   group_by(model, error_type,  train) %>%
-  rmse(truth = logit(calibrated), estimate = logit(expected.prop)) %>%
+  rmse(truth = calibrated, estimate = expected.prop) %>%
   dplyr::select(RMSE = .estimate, model, error_type, train)
 
 model_anorm <- fits %>%
@@ -1857,22 +2282,28 @@ gg.train_preds <- fits %>%
                              levels = c("Proportions", "CLR Transform", "ALR Transform"))) %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
+  ggplot(aes(calibrated, expected.prop, fill = taxon)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-#  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
- # coord_fixed() + 
+  geom_text(aes(x=0, y=.9, label=paste0("RMSE: ",round(RMSE, 2))),
+            check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),
+  #check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #coord_fixed() + 
   facet_grid(error_type~model) +
-    base_theme+
-  scale_fill_brewer(palette="Set1") +
+  base_theme+
+  scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent,
+                       breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3),
+                     labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_fill_brewer(palette="Paired") +
   theme(panel.grid = element_line(size = rel(1)),
         panel.grid.minor.x = element_blank(),
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom",
         legend.text = element_text(face="italic")) +
-    labs(x = "Calibrated proportions (log-odds)", 
-        y = "Expected proportions (log-odds)",
+    labs(x = "Calibrated proportions", 
+        y = "Expected proportions",
         fill = "Sample type", 
         colour= NULL,
         title= "Training set")
@@ -1893,21 +2324,27 @@ gg.test_preds <- fits %>%
                              levels = c("Proportions", "CLR Transform", "ALR Transform"))) %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
+  ggplot(aes(calibrated, expected.prop, fill = taxon)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
- # geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  geom_text(aes(x=0, y=.9, label=paste0("RMSE: ",round(RMSE, 2))),
+              check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),
+  #check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   #coord_fixed() + 
   facet_grid(error_type~model) +
-    base_theme+
-  scale_fill_brewer(palette="Set1") +
+  base_theme+
+  scale_fill_brewer(palette="Paired") +
+  scale_x_continuous(trans = scales::pseudo_log_trans(1e-3),
+                       labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3),
+                     labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
   theme(panel.grid = element_line(size = rel(1)),
         panel.grid.minor.x = element_blank(),
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom") +
-    labs(x = "Calibrated proportions (log-odds)", 
-        y = "Expected proportions (log-odds)",
+    labs(x = "Calibrated proportions ", 
+        y = "Expected proportions",
         fill = "Sample type", 
         colour= NULL,
         title= "Test set")
@@ -1921,25 +2358,29 @@ gg.material_pred_train <- fits %>%
   left_join(model_anorm) %>%
   distinct()%>%
   filter(train == "Training set") %>%
-  filter(error_type =="error_abs") %>%
+  filter(error_type =="error_prop") %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
+  ggplot(aes(calibrated, expected.prop, fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-#  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
- # coord_fixed() + 
+  geom_text(aes(x=0, y=.9, label=paste0("RMSE: ",round(RMSE, 2))),
+            check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),
+  #check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #coord_fixed() + 
   facet_grid(material_type~model) +
-    base_theme+
+  base_theme+
   scale_fill_brewer(palette="Set1") +
+  scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
   theme(panel.grid = element_line(size = rel(1)),
         panel.grid.minor.x = element_blank(),
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom",
         legend.text = element_text(face="italic")) +
-    labs(x = "Bias model prediction (log-odds)", 
-        y = "Observed proportions (log-odds)",
+    labs(x = "Bias model prediction", 
+        y = "Observed proportions",
         fill = "Taxon", 
         colour= NULL,
         title= "Training set")
@@ -1950,25 +2391,29 @@ gg.material_pred_test <- fits %>%
   left_join(model_anorm) %>%
   distinct()%>%
   filter(train == "Test set") %>%
-  filter(error_type =="error_abs") %>%
+  filter(error_type =="error_prop") %>%
   mutate(model = factor(model),
          model = fct_reorder(model, -RMSE)) %>%
-  ggplot(aes(logit(calibrated), logit(expected.prop), fill = material_type)) +
+  ggplot(aes(calibrated, expected.prop, fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-    geom_text(aes(x=-10, y=2, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-#  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  geom_text(aes(x=0, y=.9, label=paste0("RMSE: ",round(RMSE, 2))),
+              check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  #geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),
+  #check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   #coord_fixed() + 
   facet_grid(material_type~model) +
-    base_theme+
+  base_theme+
   scale_fill_brewer(palette="Set1") +
+  scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
   theme(panel.grid = element_line(size = rel(1)),
         panel.grid.minor.x = element_blank(),
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom",
         legend.text = element_text(face="italic")) +
-    labs(x = "Bias model prediction (log-odds)", 
-        y = "Observed proportions (log-odds)",
+    labs(x = "Bias model prediction", 
+        y = "Observed proportions",
         fill = "Taxon", 
         colour= NULL,
         title= "Testing set")
@@ -1982,19 +2427,20 @@ pdf(file="fig/bias_preds.pdf", width = 11, height = 8 , paper="a4r")
   plot(gg.material_pred_test)
 try(dev.off(), silent=TRUE)
 
+  
+  
+# RMSE by model, material, and error type
 ```
 
 # Check for outliers
 
 ```{r outliers}
-    
 # Plot residuals by sample
 fits %>%
   ggplot(aes(x  = sample_id, y = residual)) +
   geom_col() + 
   facet_grid(model~.) +
   base_theme
-
 
 tmp1 <- fits %>% 
     mutate(out = abs(residual) > quantile(abs(residual), .9975)) %>% 
@@ -2075,8 +2521,8 @@ gg.train_abs <- abs_fits %>%
   ggplot(aes(calibrated_abs, expected, fill = material_type)) +
   geom_point(alpha = 0.5, shape=21, colour="black") +
   geom_abline(lty = 2, colour = "gray80", size = 1) +
-#  geom_text(aes(x=0, y=300, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=0, y=280, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+  geom_text(aes(x=0, y=300, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
+ # geom_text(aes(x=0, y=280, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
   coord_fixed() + 
   facet_grid(error_type~model) +
     base_theme+
@@ -2085,8 +2531,8 @@ gg.train_abs <- abs_fits %>%
         panel.grid.minor.x = element_blank(),
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom") +
-    labs(x = "Calibrated proportions (log-odds)", 
-        y = "Expected proportions (log-odds)",
+    labs(x = "Calibrated individuals", 
+        y = "Expected individuals",
         fill = "Sample type", 
         colour= NULL,
         title= "Training set")
@@ -2121,8 +2567,8 @@ gg.test_abs <- abs_fits %>%
         panel.grid.minor.x = element_blank(),
         panel.grid.minor.y = element_blank(),
         legend.position = "bottom") +
-    labs(x = "Calibrated proportions (log-odds)", 
-        y = "Expected proportions (log-odds)",
+    labs(x = "Calibrated individuals", 
+        y = "Expected individuals",
         fill = "Sample type", 
         colour= NULL,
         title= "Test set")
@@ -2136,13 +2582,152 @@ pdf(file="fig/abs_preds.pdf", width = 11, height = 10 , paper="a4r")
 try(dev.off(), silent=TRUE)
 ```
 
+# RMSE plot
+
+```{r}
+# Define normalised RMSE function 
+# Modified from https://www.marinedatascience.co/blog/2019/01/07/normalizing-the-rmse/
+nrmse_func <-  function(truth, estimate, type = "sd") {
+  
+    squared_sums <- sum((truth - estimate)^2)
+    mse <- squared_sums/length(truth)
+    rmse <- sqrt(mse)
+    if (type == "sd") nrmse <- rmse/sd(truth)
+    if (type == "mean") nrmse <- rmse/mean(truth)
+    if (type == "maxmin") nrmse <- rmse/ (max(truth) - min(truth))
+    if (type == "iq") nrmse <- rmse/ (quantile(truth, 0.75) - quantile(truth, 0.25))
+    if (!type %in% c("mean", "sd", "maxmin", "iq")) message("Wrong type!")
+    nrmse <- round(nrmse, 3)
+ return(nrmse)
+    
+}
+
+# Get RMSE
+gg.rmse <- fits %>%
+  mutate(train = paste0("Relative - ", train)) %>%
+  group_by(model, error_type,  train) %>%
+  summarise(RMSE = nrmse_func(truth = calibrated, estimate = expected.prop, type = "sd"))  %>% 
+  bind_rows(
+    abs_fits %>%
+    mutate(train = paste0("Absolute - ", train)) %>%
+    group_by(model, error_type,  train) %>%
+    summarise(RMSE = nrmse_func(truth = expected, estimate = calibrated_abs, type = "sd"))) %>%
+  filter(error_type %in% c("error_prop", "error_abs", "error_clr", "error_alr")) %>%
+  mutate(model = factor(model, levels = c("Uncorrected", "metacal", "Linear Regression", "LASSO Regression", "SVM", "Random Forest", "XGBOOST Tree")),
+         train = factor(train, levels=c("Relative - Training set", "Relative - Test set", 
+                                        "Absolute - Training set",  "Absolute - Test set"))) %>%
+  ggplot(aes(x = model, y=RMSE, fill=model))+
+  geom_col()+
+  scale_fill_brewer(palette="Paired")+
+  facet_grid(train~error_type)+
+  base_theme +
+  labs(title = "Absolute Abundances",
+       y = "Normalised RMSE",
+       x = "Model Type")
+
+gg.abs_rmse
+
+gg.rmse <- fits %>%
+  group_by(model, error_type,  train) %>%
+  summarise(RMSE = nrmse_func(truth = calibrated, estimate = expected.prop, type = "sd"))  %>%
+  mutate(type = "Relative") %>%
+  bind_rows(
+    abs_fits %>%
+    group_by(model, error_type,  train) %>%
+    summarise(RMSE = nrmse_func(truth = expected, estimate = calibrated_abs, type = "sd")) %>%
+    mutate(type = "Absolute")) %>%
+  dplyr::filter(error_type %in% c("error_prop", "error_abs", "error_clr", "error_alr")) %>%
+  mutate(
+    error_type = error_type %>% str_remove("error_"),
+    model = factor(model, levels = c(
+      "XGBOOST Tree",
+      "Random Forest",
+      "SVM",
+      "LASSO Regression",
+      "Linear Regression",
+      "metacal", 
+      "Uncorrected")),
+    train = factor(train, levels=c("Training set", "Test set")),
+    type = factor(type, levels = c("Relative", "Absolute"))) %>%
+  ggplot(aes(x = model, y=RMSE, fill=error_type))+
+  geom_point(position=position_dodge(0.5), shape=21, size=2, colour="black")+
+  scale_fill_viridis_d()+
+  #scale_fill_brewer(palette="Paired")+
+  facet_grid(train~type)+ 
+  coord_flip() +
+  base_theme +
+  theme(legend.position = "bottom")+
+  labs(y = "Normalised RMSE",
+       x = "Model Type",
+       fill = "Transformation")
+
+gg.rmse
+
+
+# Corrections model
+gg.cal <- fits %>%
+  mutate(type = "Relative",
+             train = factor(train, levels=c("Training set", "Test set"))) %>%
+  filter(error_type == "error_abs", model %in% c("Random Forest", "Uncorrected")) %>%
+  mutate(paired = paste0(sample_id, taxon)) %>%
+  ggplot(aes(calibrated, expected.prop, fill = model, group = paired)) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  geom_line(colour="gray", alpha=0.5, position = ggstance::position_dodgev(height=0.1)) +
+  geom_point(alpha = 0.5, shape=21, colour="black", position = ggstance::position_dodgev(height=0.1)) +
+  base_theme+
+  facet_grid(train~type)+
+  scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent,
+                       breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3),
+                     labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
+  scale_fill_manual(values=c("red", "gray"))+
+    theme(panel.grid = element_line(size = rel(1)),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = "bottom",
+        legend.text = element_text(face="italic")) +
+    labs(x = "Calibrated proportions", 
+        y = "Expected proportions",
+        fill = "Sample type", 
+        colour= NULL)
+
+
+gg.cal_abs <- abs_fits %>%
+  mutate(type = "Absolute",
+             train = factor(train, levels=c("Training set", "Test set"))) %>%
+  filter(error_type == "error_abs", model %in% c("Random Forest", "Uncorrected")) %>%
+  mutate(paired = paste0(sample_id, taxon)) %>%
+  ggplot(aes(calibrated_abs, expected, fill = model, group = paired)) +
+  geom_abline(lty = 2, colour = "gray80", size = 1) +
+  geom_line(colour="gray", alpha=0.5, position = ggstance::position_dodgev(height=1)) +
+  geom_point(alpha = 0.5, shape=21, colour="black", position = ggstance::position_dodgev(height=1)) +
+  base_theme+
+  facet_grid(train~type)+
+  scale_x_continuous(trans = scales::pseudo_log_trans(1), breaks=c(0, 5, 10, 25, 50, 100, 200, 300), limits=c(0,340))+
+  scale_y_continuous(trans = scales::pseudo_log_trans(1), breaks=c(0, 5, 10, 25, 50, 100, 200, 300), limits=c(0,340))+
+  scale_fill_manual(values=c("red", "gray"))+
+    theme(panel.grid = element_line(size = rel(1)),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = "none",
+        legend.text = element_text(face="italic")) +
+    labs(x = "Calibrated Individuals", 
+        y = "Expected Individuals",
+        fill = "Sample type", 
+        colour= NULL)
+
+gg.cal_abs
+
+ 
+gg.rmse - (gg.cal - gg.cal_abs)
+```
+
 
 # Fit final model
 
 ```{r Final model}
-
 final_fit <- joint_train %>%
-  filter(error_type == "error_prop") %>%
+  filter(error_type == "error_abs") %>%
   filter(expected > 0) %>%
   group_by(error_type) %>%
   nest() %>%
@@ -2222,7 +2807,7 @@ ranger_workflow_prop %>%
   unnest(.metrics) %>%
   filter(.metric == "rmse") %>%
   summarise(rmse = mean(.estimate))
-  rmse(truth = observed.prop, estimate = predicted)
+
 ```
 
 
@@ -2278,6 +2863,7 @@ pdf(file="fig/calibrated_bars.pdf", width = 11, height = 8 , paper="a4r")
   plot(gg.calbars_ra)
   plot(gg.calbars_abs)
 try(dev.off(), silent=TRUE)
+  
 ```
 
 # Jacknife RMSE estimates
