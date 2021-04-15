@@ -49,9 +49,14 @@ Should be able to do this within a tidymodels framework with bootsrapping
                     "devtools",
                     "data.table",
                     "future",
-                    "furrr")
+                    "furrr",
+                    "chngpt",
+                    "ggnewscale",
+                    "ggpubr",
+                    "magick")
 .bioc_packages <- c("dada2",
                     "phyloseq", 
+                    "ggtree",
                     "ALDEx2",
                     "Biostrings")
 
@@ -97,7 +102,7 @@ rownames(seqtab)  <- rownames(seqtab) %>%
 tax <- readRDS("output/rds/final_tax.rds") 
 seqs <- DNAStringSet(colnames(seqtab))
 names(seqs) <- seqs
-phy <- read.tree("output/ultrametric_tree_order_constrained.nwk")
+phy <- read.tree("output/order_constrained_rerooted.nwk")
 
 ##### Rename problematic samples
 rownames(seqtab)  <- rownames(seqtab) %>%
@@ -177,7 +182,8 @@ saveRDS(ps, "output/rds/ps_idtaxaExact.rds")
 tax_table(ps)[,3][which(str_detect(tax_table(ps)[,8], "Synthetic"))] <- "Arthropoda"
 
 # Rename incorrectly named taxa
-tax_table(ps)[,8][which(tax_table(ps)[,8]=="Carpophilus dimidiatus/nr.dimidiatus")] <- "Carpophilus nr.dimidiatus"
+tax_table(ps)[,8][which(tax_table(ps)[,8]=="Carpophilus dimidiatus/nr.dimidiatus")] <- "Carpophilus truncatus"
+tax_table(ps)[,8][which(tax_table(ps)[,8]=="Carpophilus nr.dimidiatus")] <- "Carpophilus truncatus"
 tax_table(ps)[,8][which(tax_table(ps)[,8]=="Brachypeplus Sp1")] <- "Brachypeplus Sp"
 tax_table(ps)[,8][which(tax_table(ps)[,8]=="Brachypeplus Sp2")] <- "Brachypeplus Sp"
 
@@ -302,7 +308,9 @@ exp_samples <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
   expected > 0) %>%
   distinct()
 
-summary_dat <- speedyseq::psmelt(ps1) %>%
+summary_dat <- ps1 %>%
+  speedyseq::tax_glom(taxrank = "Species") %>%
+  speedyseq::psmelt()  %>%
   filter(Abundance > 0 ) %>%
   dplyr::select(OTU, Sample, Abundance, sample_id, sample_name, extract_id, fcid, rank_names(ps1), type) %>%
   mutate(Genus = case_when(
@@ -327,6 +335,7 @@ summary_dat <- speedyseq::psmelt(ps1) %>%
   ))
 
 summary_dat%>%
+  filter(above_thresh) %>%
   group_by(mock_spp) %>%
   summarise(n_extracts = n_distinct(extract_id), n_samples = n_distinct(sample_id),
             n_asv = n_distinct(OTU), n_spp = n_distinct(Species), n_genus = n_distinct(Genus))
@@ -358,7 +367,6 @@ summary_dat %>%
 
 # Spread of ASVs across samples - Add a grouping variable if they were in the mock communities, as well as if they were below 1e-4RA
 ps1 %>%
-
   group_by(extract_id, fcid) %>%
   dplyr::filter(Abundance > 0) %>%
   summarise(counts = n_distinct(OTU)) %>%
@@ -407,6 +415,91 @@ speedyseq::psmelt(ps1) %>%
   mutate(Rank = factor(Rank, rank_names(ps1))) %>%
   arrange(Rank)
 
+
+# Phylogeny of taxaa
+library(ggtree)
+library(ggnewscale)
+
+tree <- ps1 %>%
+      speedyseq::tax_glom(taxrank = "Species")%>%
+      phy_tree()
+
+tree$tip.label <- tree$tip.label %>%
+    str_remove("^.*-") %>%
+  str_replace("nr.dimidiatus", "truncatus")
+
+# Check which are missing
+unique(summary_dat$Species)[!unique(summary_dat$Species) %in% tree$tip.label]
+
+unique(rownames(p1dat))[!unique(rownames(p1dat)) %in% tree$tip.label]
+
+
+# Plot tree, with taxon names an a
+known_taxa <- exp_samples$taxon %>% str_replace("_", " ") %>% unique()
+
+
+p1dat <- ps1 %>%
+    speedyseq::tax_glom(taxrank = "Species") %>%
+    speedyseq::psmelt() %>%
+    dplyr::select(sample_id, OTU, type, Abundance) %>%
+    mutate(OTU = OTU %>% str_remove("^.*-") %>% str_replace("nr.dimidiatus", "truncatus"),
+           type = type %>% str_remove("Carp")) %>%
+    group_by(sample_id) %>%
+    mutate_at(vars(Abundance), ~ . / sum(.)) %>%
+    mutate(keep = case_when(
+      OTU %in% known_taxa ~ TRUE,
+      Abundance > 1e-4 & type == "Trap" ~ TRUE,
+      !OTU %in% known_taxa & !type == "Trap"~ FALSE,
+      TRUE ~ FALSE
+    ))%>%
+    filter(keep) %>%
+    filter(!OTU == "Opilo whitei") %>%
+    drop_na() %>%
+    group_by(OTU, type) %>%
+    summarise(Abundance = mean(Abundance)) %>%
+    distinct() %>%
+    pivot_wider(names_from = type,
+    values_from = Abundance,
+    values_fill = 0) %>%
+    filter(!str_detect(OTU, "__")) %>%
+    column_to_rownames("OTU")
+
+tree <- drop.tip(tree, tree$tip.label[!tree$tip.label %in% rownames(p1dat)])
+
+circ <- ggtree(tree, layout = "circular", branch.length = 'none', aes(color=Order))
+
+circ_dat <- circ$data %>%
+  left_join(speedyseq::psmelt(ps1)  %>%
+    mutate(OTU = OTU %>% str_remove("^.*-")  %>% str_replace("nr.dimidiatus", "truncatus")) %>%
+    mutate(taxa_kept = case_when(
+    Species %in% known_taxa ~ TRUE,
+    !Species %in% known_taxa ~ FALSE
+    )) %>%
+    dplyr::select(label = OTU, Order, taxa_kept) %>%
+    distinct()
+  )
+
+cols <- colorRampPalette(brewer.pal(8, "Set2"))(length(unique(circ_dat$Order)))
+circ <- circ %<+% circ_dat +
+    scale_colour_manual(values=cols, na.value="black")
+
+gg.phylo <- gheatmap(circ, p1dat, offset=0, width=.4, color="gray20",
+    colnames_angle=95, colnames_offset_y = 0) +
+    scale_fill_viridis_c(option="B", name="Abundance", alpha=0.9, trans="log10", label= scales::percent) +
+    geom_tiplab(offset=7.2, align=FALSE, size=4)+
+    new_scale_colour() +
+    geom_tippoint(aes(colour=taxa_kept), size=3)+
+    scale_colour_manual(values=c("#d2d2d2", "#1b9e77")) +
+    labs(colour =
+    "Morphologically \nrecorded?")
+
+gg.phylo
+
+#Save figure
+pdf(file="fig/supplementary/phylo_detections.pdf", width = 8, height = 6, paper="a4r")
+  plot(gg.phylo)
+try(dev.off(), silent=TRUE)
+
 ```
 
 # Taxon filtering
@@ -419,7 +512,7 @@ tax_to_keep <- exp_samples$taxon %>%
   unique() %>%
   str_replace("_", " ")
 
-tax_to_keep[!tax_to_keep %in% as(tax_table(ps1),"data.frame")$Species]
+tax_to_keep[!tax_to_keep %in% (tax_table(ps1) %>% as("matrix") %>% as.data.frame %>% dplyr::pull(Species))]
 
 ps2 <- ps1 %>%
   subset_taxa(Species %in% tax_to_keep)
@@ -592,13 +685,114 @@ joint <- sam %>%
   mutate(sample_size = sum(expected), # Do the same for the ratios?
          observed_abs = observed.prop * sample_size,
          error_abs = observed_abs / expected,
-         error_prop = observed.prop / expected.prop
+         error_prop = observed.prop / expected.prop,
+         rsq_abs = (expected - observed_abs)^2,
+         rsq_prop = (expected.prop - observed.prop)^2,
+         rprop = expected.prop - observed.prop
          )%>%
   filter(!sample_id=="HLVKYDMXX_CML6")  %>%
   mutate(amp_rep = paste0("PCR Rep ", amp_rep),
          extrep = extrep %>% str_replace("Extraction", "NovaSeq Ext"))
 
+# Error in material types
 
+# Get RMSE
+mat_rmse <- joint %>%
+  group_by(material_type) %>%
+  rmse(truth = expected.prop, estimate = observed.prop) %>%
+  dplyr::select(RMSE = .estimate, material_type)
+
+
+gg.mat_err <- joint  %>%
+  left_join(mat_rmse) %>%
+  mutate(material_type = material_type %>%
+        str_replace("CarpLarval", "Larval Mock") %>%
+        str_replace("CarpMock", "Adult Mock") %>% 
+        str_replace("CarpTrap", "Adult Trapped") %>%
+          factor(levels = c("Adult Trapped", "Larval Mock", "Adult Mock"))) %>%
+  mutate(taxon = taxon %>% str_replace("_", " ")) %>%
+  ggplot(aes(x = material_type, y = rsq_prop, colour=taxon, group=material_type))+
+  geom_boxplot(width =0.9, alpha=0.4, outlier.colour = NA, fill="#d2d2d2", colour="black")+
+  geom_point(position=position_jitter(width = 0.15, height=0), alpha=0.6, size=2)+ 
+  geom_text(aes(label = paste0("RMSE:",round(RMSE, 2)), y = .3), check_overlap = TRUE, colour="black") +
+  scale_colour_brewer(palette = "Paired")+
+  scale_y_continuous(trans=pseudo_log_trans(0.01), labels=scales::percent_format(accuracy=1), breaks=c(0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4))+
+  base_theme +
+  #facet_grid(~material_type)+
+  coord_flip()+
+  theme(
+    #strip.text = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    strip.text = element_text(face = "italic"),
+    legend.position = "none"
+  )+
+  labs(y="Squared residual error ",
+       x = NULL)
+
+gg.mat_err
+
+
+# Deviation in taxon specific errors between samples
+error_variation <- joint %>% 
+  #filter(fcid == "HLVKYDMXX")%>%
+  group_by(taxon)%>%
+  group_modify(~{
+    amp_err <- .x %>%
+      group_by(extract_id) %>%
+      add_tally()  %>%
+      filter(n > 1) %>%
+      summarise(error_prop = mean(error_prop),  rmse_prop = sqrt(mean(rsq_prop))) %>%
+      mutate(type = "PCR")%>%
+      dplyr::select(-extract_id)
+    
+    ext_err  <- .x %>%
+      group_by(extract_id, sample_name, fcid) %>%
+      summarise(error_prop = mean(error_prop),  rsq_prop = mean(rsq_prop)) %>%
+      ungroup() %>%
+      mutate(sample_fcid = paste0(fcid, sample_name)) %>%
+      group_by(sample_fcid) %>% 
+      add_tally()  %>%
+      filter(n > 1) %>%
+      summarise(error_prop = mean(error_prop),  rmse_prop = sqrt(mean(rsq_prop))) %>%
+      mutate(type = "Extraction") %>%
+      dplyr::select(-sample_fcid)
+    
+    samp_err  <- .x %>%
+      mutate(sample_fcid = paste0(fcid, sample_name)) %>%
+      group_by(sample_fcid) %>% 
+      summarise(error_prop = mean(error_prop), rmse_prop = sqrt(mean(rsq_prop))) %>%
+      ungroup() %>%
+      mutate(type = "Sample") %>%
+      dplyr::select(-sample_fcid)
+    
+    out <- bind_rows(amp_err, ext_err, samp_err)
+    return(out)
+  })
+
+gg.err_var <- error_variation %>%
+  mutate(taxon = taxon %>% str_replace("_", " ")) %>%
+  ggplot(aes(x = type, y = rmse_prop, fill=taxon, group=type))+
+  geom_point(position=position_jitter(width = 0.15, height=0), colour="#d2d2d2", alpha=0.8)+
+  geom_boxplot(width =0.9, alpha=0.7, outlier.colour = NA)+
+  scale_fill_brewer(palette = "Paired")+
+  facet_grid(~taxon) +
+  scale_y_continuous(trans=pseudo_log_trans(0.01), labels=scales::percent_format(accuracy=1))+
+  base_theme +
+  theme(
+    #strip.text = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    strip.text = element_text(face = "italic"),
+    legend.position = "none"
+  )+
+  labs(y="RMSE",
+       x = NULL)
+
+gg.err_var
+
+## Visualise errors in proportions between different replicates
 # Original errors
 error_rmse <- joint %>%
   group_by(extrep, amp_rep) %>%
@@ -610,9 +804,8 @@ error_anorm <- joint %>%
   group_by(material_type) %>%
     summarise(Adist = anorm(observed.prop / expected)) 
 
-## Visualise errors in proportions
 gg.error_props <- joint %>% 
-    mutate(taxon = taxon %>% str_replace("_", " ")) %>%
+  mutate(taxon = taxon %>% str_replace("_", " ")) %>%
   filter(expected > 0) %>%
   #mutate_at(vars(expected.prop, observed.prop), logit) %>%
   left_join(error_rmse) %>%
@@ -636,74 +829,11 @@ gg.error_props <- joint %>%
 
 gg.error_props
 
-# Deviation in taxon specific errors between samples
-error_variation <- joint %>% 
-  filter(fcid == "HLVKYDMXX")%>%
-  group_by(taxon)%>%
-  group_modify(~{
-    amp_err <- .x %>%
-      group_by(extract_id) %>%
-      add_tally()  %>%
-      filter(n > 1) %>%
-      summarise(error_prop = mean(error_prop)) %>%
-      mutate(type = "PCR")%>%
-      dplyr::select(-extract_id)
-    
-    ext_err  <- .x %>%
-      group_by(extract_id,sample_name, fcid) %>%
-      summarise(error_prop = mean(error_prop)) %>%
-      ungroup() %>%
-      mutate(sample_fcid = paste0(fcid, sample_name)) %>%
-      group_by(sample_fcid) %>% 
-      add_tally()  %>%
-      filter(n > 1) %>%
-      summarise(error_prop = mean(error_prop)) %>%
-      mutate(type = "Extraction") %>%
-      dplyr::select(-sample_fcid)
-    
-    samp_err  <- .x %>%
-      mutate(sample_fcid = paste0(fcid, sample_name)) %>%
-      group_by(sample_fcid) %>% 
-      summarise(error_prop = mean(error_prop)) %>%
-      ungroup() %>%
-      mutate(type = "Sample") %>%
-      dplyr::select(-sample_fcid)
-    
-    out <- bind_rows(amp_err, ext_err, samp_err)
-    return(out)
-  })
-
-gg.err_var <- error_variation %>%
-  mutate(taxon = taxon %>% str_replace("_", " ")) %>%
-  ggplot(aes(x = type, y = error_prop, fill=taxon, group=type))+
-  geom_point(position=position_jitter(width = 0.15, height=0), colour="#d2d2d2", alpha=0.8)+
-  geom_boxplot(width =0.9, alpha=0.7, outlier.colour = NA)+
-  scale_fill_brewer(palette = "Paired")+
-  facet_grid(~taxon) +
-  scale_y_continuous(trans=pseudo_log_trans(1e-1), breaks=c(0, 1, 3, 5, 10))+
-  base_theme +
-  theme(
-    #strip.text = element_blank(),
-    panel.grid.major.x = element_blank(),
-    panel.grid.minor.x = element_blank(),
-    strip.text = element_text(face = "italic"),
-    legend.position = "none"
-  )+
-  labs(y="Error in Proportions",
-       x = NULL)
-
-
-Fig2 <- gg.error_props /gg.err_var + plot_layout(heights = c(3,1)) + plot_annotation(tag_levels = "A")
-
-Fig2
-
 #Save figure
-pdf(file="fig/supplementary/error_consistency.pdf", width = 10, height = 8 , paper="a4r")
-  plot(Fig2)
+pdf(file="fig/supplementary/error_fits_replicates.pdf", width = 10, height = 8 , paper="a4r")
+  plot(gg.error_props)
 try(dev.off(), silent=TRUE)
-
 ```
-
 
 ## Merge replicates 
 
@@ -765,6 +895,8 @@ joint <- sam %>%
          error_prop = observed.prop / expected.prop,
          error_prop_log = log(error_prop),
          error_prop_logit = logit(error_prop),
+         res_prop = expected.prop - observed.prop,
+         res_abs = expected - observed_abs,
          #error_abs_centre = center_elts(observed_abs / expected, na.rm = TRUE)
          )  %>%
   group_by(sample_id) %>%
@@ -788,55 +920,82 @@ saveRDS(joint, "joint.rds")
 # Visualise errors
 
 ```{r visualise errors}
-# Original errors
-error_rmse <- joint %>%
-  group_by(material_type) %>%
-  rmse(truth = expected.prop, estimate = observed.prop) %>%
-  dplyr::select(RMSE = .estimate, material_type)
+gg.error_types <- joint %>%
+  pivot_longer(c(error_alr, error_clr, res_prop, res_abs),
+               names_to = "error_type",
+               values_to="error_val")  %>%
+  mutate(material_type = material_type %>%
+        str_replace("CarpLarval", "Larval Mock") %>%
+        str_replace("CarpMock", "Adult Mock") %>% 
+        str_replace("CarpTrap", "Adult Trapped") %>%
+        factor(levels = c("Adult Trapped", "Larval Mock", "Adult Mock"))) %>%
+  mutate(taxon = taxon %>% 
+           str_replace("_", " ") %>%
+           str_replace("Sp$", "sp.")) %>%
+  mutate(error_type = error_type %>%
+      str_remove("error_") %>%
+      str_remove("res_") %>%
+      str_replace("prop$", "Proportions") %>%
+      str_replace("alr$", "ALR")%>%
+      str_replace("clr$", "CLR")%>%
+      str_replace("abs$", "Absolute") %>%
+      factor(levels = c("Proportions", "Absolute", "ALR", "CLR"))) %>%
+  ungroup()%>%
+  mutate(uid = row_number()) %>%
+  ggplot(aes(x = taxon, y = error_val, colour=taxon, group=uid))+
+  geom_linerange(aes(ymin=0, ymax = error_val, xmax=taxon, xmin=taxon), position=position_dodge(width = 0.4), alpha=0.6, colour="#d2d2d2")+
+  geom_hline(yintercept = 0, colour="black", size=1)+
+  geom_point(position=position_dodge(width = 0.4), alpha=0.8, size=1.5)+
+  scale_colour_brewer(palette = "Paired")+
+  #scale_x_discrete(position="top")+
+  base_theme +
+  facet_grid(material_type~error_type, scales="free", space="free_y", drop=TRUE)+
+  coord_flip()+
+  theme(
+    #strip.text = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none",
+    axis.text.y = element_text(face="italic",)
+  )+
+  labs(y="Error",
+       x = NULL)
 
-error_anorm <- joint %>%
-  group_by(material_type) %>%
-    summarise(Adist = anorm(observed.prop / expected)) 
+gg.error_types
 
-## Visualise errors in proportions
-gg.error_props <- joint %>% 
-  filter(expected > 0) %>%
-  #mutate_at(vars(expected.prop, observed.prop), logit) %>%
-  left_join(error_rmse) %>%
-  left_join(error_anorm) %>%
-  ggplot(aes(expected.prop, observed.prop, fill = taxon)) + 
-  geom_abline(intercept = 0, slope=1) +
-  geom_jitter(alpha=0.7, shape=21, colour="black", ) +
-  geom_text(aes(x=-10, y=3, label=paste0("RMSE: ",round(RMSE, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  geom_text(aes(x=-10, y=1, label=paste0("A.dist: ",round(Adist, 2))),check_overlap = TRUE, inherit.aes = FALSE, hjust = 0)+
-  scale_fill_brewer(palette="Paired")+
-    scale_x_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
-  scale_y_continuous(trans = scales::pseudo_log_trans(1e-3), labels=scales::percent, breaks=c(0, 0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1))+
-  facet_grid(fcid~material_type)+
-    coord_fixed() + 
-  theme_bw()+
-  labs(fill = "Taxon",
-       x="Expected proportions (log-odds)",
-       y="Observed proportions (log-odds)") 
+# Images for multifig
+gg.mock_adult <- ggplot() +
+  background_image(image_read("images/carpophilus_mock3.jpg")) + 
+  coord_fixed()
 
-gg.error_props
+gg.mock_larval <- ggplot() +
+  background_image(image_read("images/Carpophilus_larval1.jpg")) + 
+  coord_fixed()
 
-## Visualise errors in abs
-gg.error_abs <- joint %>% 
-  filter(expected > 0) %>%
-  ggplot(aes(expected, observed_abs, color = taxon)) + 
-  geom_abline(intercept = 0, slope=1) +
-  geom_jitter(alpha=0.7) +
-  scale_color_brewer(palette="Spectral")+
-  facet_grid(material_type~fcid)+
-  theme_bw()+
-  labs(title = "Observed vs. expected absolute abundances",
-       color = "Taxon",
-       x="Expected Individuals",
-       y="Observed Individuals") 
+gg.trap_adult <- ggplot() +
+  background_image(image_read("images/carpophilus_trap5.jpg")) + 
+  coord_fixed()
 
+
+photo_stack <- gg.mock_adult / gg.mock_larval / gg.trap_adult
+
+
+#Fig2a <- photo_stack - gg.error_types + plot_layout(widths = c(1,3))
+Fig2a <- gg.error_types - photo_stack + plot_layout(widths = c(5,1))
+
+Fig2 <-  Fig2a / gg.err_var + plot_layout(heights = c(3,1)) + plot_annotation(tag_levels = "A")
+
+Fig2
+
+#Save figure
+pdf(file="fig/Fig2_error_consistency.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig2)
+try(dev.off(), silent=TRUE)
+
+  
 # Visualise the error in all pairwise ratios
-gg.error_rat <- joint %>%
+gg.pw_error_rat <- joint %>%
   filter(expected > 0) %>%
   dplyr::mutate(Taxon = taxon %>%
                   str_replace("^.+_", paste0(str_extract(taxon, "."), "_"))) %>% #Shorten genus names
@@ -855,14 +1014,6 @@ gg.error_rat <- joint %>%
           axis.text.x = element_text(angle=45, hjust=1)) +
   labs(x = "Taxon ratios",
        y = "Error in taxon ratios")
-
-
-#Save figure
-pdf(file="fig/errors.pdf", width = 11, height = 8 , paper="a4r")
-  plot(gg.error_props)
-  plot(gg.error_abs)
-  plot(gg.error_rat)
-try(dev.off(), silent=TRUE)
 ```
 
 # Compare bias models
@@ -990,8 +1141,6 @@ prop_recipe <- recipe(formula =  expected.prop ~ 0 + observed.prop + taxon + fci
 
 
 # Define model function  ------------------------------------------------------------
-
-
 modelling_func <- function(train, test, cv, error_type, model_type, val_err = TRUE){
   if (error_type  %in% c("error_alr", "error_clr")){
     type <- "ratio"
@@ -1136,26 +1285,13 @@ modelling_func <- function(train, test, cv, error_type, model_type, val_err = TR
   } else (stop("type must be 'ratio' or 'prop' "))
   
   # Tune model if required
-  if(!model_type %in% c("lm", "xgboost")){
-    model_tune <- tune_grid(model_workflow, resamples = cv, grid = 20)
+  if(!model_type %in% c("lm")){
+    #Tune grid using a latin hypercube design
+    model_tune <- tune_grid(model_workflow, resamples = cv, grid = 40)
     model_workflow <- finalize_workflow(model_workflow, model_tune %>% select_best("rmse"))
     tune_res <- collect_metrics(model_tune)
     
-  }else if (model_type == "xgboost"){
-    xgb_grid <- grid_latin_hypercube(
-      tree_depth(),
-      min_n(),
-      loss_reduction(),
-      sample_size = sample_prop(),
-      finalize(mtry(), train),
-      learn_rate(),
-      size = 30
-    )
-    model_tune <- tune_grid(model_workflow, resamples = cv, grid = xgb_grid)
-    model_workflow <- finalize_workflow(model_workflow, model_tune %>%
-                                          select_best("rmse"))
-    tune_res <- collect_metrics(model_tune)
-    }else {
+  }else {
     tune_res <- NULL
   }
   
@@ -1175,7 +1311,7 @@ modelling_func <- function(train, test, cv, error_type, model_type, val_err = TR
       filter(.metric == "rmse") %>%
       dplyr::select(fold= id, RMSE = .estimate)
   } else (cv_error <- NULL)
-
+  
   out <- tibble(model_obj = list(model_obj),
                 pred_train = list(pred_train),
                 pred_test = list(pred_test),
@@ -1185,11 +1321,12 @@ modelling_func <- function(train, test, cv, error_type, model_type, val_err = TR
 }
 # Fit modelling function  ------------------------------------------------------------
 
-cores <- 48
-
+cores <- 2
 future::plan(future::multiprocess, workers = cores)
+
+future::plan(sequential)
 fits_all <- splits %>%
-  filter(error_type %in% c("error_clr", "error_alr", "error_abs", "error_prop"), model_type %in% c("metacal", "lm", "uncorrected")) %>%
+  filter(error_type %in% c("error_prop"), model_type %in% c("svm", "lm", "uncorrected")) %>%
   mutate(
     fits = furrr::future_pmap(list(train, test, cv, error_type, model_type), modelling_func)
   ) %>% 
@@ -1197,8 +1334,6 @@ fits_all <- splits %>%
 
 # write out fits_all
 saveRDS(fits_all, "fits_all.rds")
-
-
 
 test_splits <- splits %>%
   filter(error_type %in% c("error_prop_logit"), model_type %in% c("lasso")) 
@@ -1234,7 +1369,7 @@ To determine the models predictive ability to new data, we also determine these 
 ```{r evaluate fits}
 # Read back in fits_all
 fits_all <- readRDS("fits_all.rds")
-
+ 
 # Get fits for training set
 all_fits_train <- fits_all %>%
   unnest(pred_train, train) %>%
@@ -1263,13 +1398,14 @@ all_fits_train <- fits_all %>%
   calibrated = case_when(
     error_type %in% c("error_prop", "error_abs", "error_abs_log", "error_prop_log", "error_prop_logit") & !model_type == "uncorrected"~ estimated,
     model_type == "uncorrected" ~ observed.prop,
-    TRUE ~ observed.prop / estimated),
-  residual = observed.prop / predicted
+    TRUE ~ observed.prop / estimated)
   ) %>%
   group_by(sample_id, error_type, model_type, seed) %>%
   mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
-  mutate(residual = calibrated / expected.prop) %>%
+ # mutate(residual = calibrated / expected.prop) %>%
+  mutate(residual = expected.prop - calibrated,
+         rsq = residual^2) %>%
   dplyr::filter(expected > 0)
 
 
@@ -1300,13 +1436,14 @@ all_fits_test <- fits_all %>%
   calibrated = case_when(
     error_type %in% c("error_prop", "error_abs", "error_abs_log", "error_prop_log", "error_prop_logit") & !model_type == "uncorrected"~ estimated,
     model_type == "uncorrected" ~ observed.prop,
-    TRUE ~ observed.prop / estimated),
-  residual = observed.prop / predicted
+    TRUE ~ observed.prop / estimated)
   ) %>%
   group_by(sample_id, error_type, model_type, seed) %>%
   mutate_at(vars(predicted, calibrated, observed.prop, expected.prop), ~ . / sum(., na.rm=TRUE) ) %>%
   ungroup() %>%
-  mutate(residual = calibrated / expected.prop) %>%
+  #mutate(residual = calibrated / expected.prop) %>%
+  mutate(residual = expected.prop - calibrated,
+         rsq = residual^2) %>%
   dplyr::filter(expected > 0)
 
 ```
@@ -1319,7 +1456,8 @@ fits <- all_fits_train %>%
   mutate(train = "Training set") %>%
   bind_rows(all_fits_test %>%
     mutate(train = "Test set")) %>%
-  dplyr::select(model = model_type,seed, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated, train, calibrated, residual,  error_type ,sample_size) %>%
+  dplyr::select(model = model_type,seed, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop, observed, observed.prop, predicted, estimated, train, calibrated, residual, rsq,  error_type ,sample_size) %>%
+  filter(!error_type == "error_abs_log") %>%
   mutate(model = model %>%
            str_replace("keras", "Neural Network") %>%
            str_replace("rf", "Random Forest") %>%
@@ -1327,19 +1465,27 @@ fits <- all_fits_train %>%
            str_replace("xgboost", "XGBOOST") %>%
            str_replace("lasso", "LASSO Regression") %>%
            str_replace("uncorrected", "Uncorrected")%>%
-           str_replace("svm", "SVM"))
+           str_replace("svm", "SVM"),
+         error_type = error_type %>%
+      str_remove("error_") %>%
+      str_replace("prop$", "Proportions") %>%
+      str_replace("prop_log$", "Log")%>%
+      str_replace("prop_logit$", "Logit")%>%
+      str_replace("alr$", "ALR")%>%
+      str_replace("clr$", "CLR")%>%
+      str_replace("abs$", "Absolute"))
 
 
 # Absolute abundances 
-
 abs_fits <- all_fits_train %>%
   mutate(train = "Training set") %>%
   bind_rows(all_fits_test %>%
     mutate(train = "Test set")) %>%
-  dplyr::select(model = model_type, seed, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop ,observed, observed.prop, predicted, estimated, calibrated, train, error_type ,sample_size) %>%
+  dplyr::select(model = model_type, seed, taxon, material_type, sample_name, sample_id, fcid, expected, expected.prop, observed, observed.prop, predicted, estimated, calibrated, residual, rsq,  train, error_type, sample_size) %>%
   mutate(predicted_abs = predicted * sample_size,
          observed_abs = observed.prop * sample_size,
          calibrated_abs = calibrated * sample_size)%>%
+  filter(!error_type == "error_abs_log") %>%
   mutate(model = model %>%
            str_replace("keras", "Neural Network") %>%
            str_replace("rf", "Random Forest") %>%
@@ -1347,13 +1493,22 @@ abs_fits <- all_fits_train %>%
            str_replace("xgboost", "XGBOOST") %>%
            str_replace("lasso", "LASSO Regression") %>%
            str_replace("uncorrected", "Uncorrected")%>%
-           str_replace("svm", "SVM"))
+           str_replace("svm", "SVM"),
+         error_type = error_type %>%
+      str_remove("error_") %>%
+      str_replace("prop$", "Proportions") %>%
+      str_replace("prop_log$", "Log")%>%
+      str_replace("prop_logit$", "Logit")%>%
+      str_replace("alr$", "ALR")%>%
+      str_replace("clr$", "CLR")%>%
+      str_replace("abs$", "Absolute"))
 
 
 # RMSE Between models
 ## Assess significant differences
 model_rmse <- fits %>%
   mutate(type = "Relative") %>%
+  filter(!(model == "metacal" & !error_type %in% c("ALR", "CLR"))) %>%
   bind_rows(
     abs_fits %>%
     mutate(type = "Absolute")) %>%
@@ -1362,43 +1517,27 @@ model_rmse <- fits %>%
   rmse(truth = calibrated, estimate = expected.prop) %>%
   mutate(RMSE = .estimate)
 
-# Compare to uncorrected
+# Compare to baseline linear regression model
 library(ggpubr)
-compare_means(RMSE ~ model,  data = model_rmse, ref.group = "Uncorrected", group.by = c("train", "error_type", "type"),
-              method = "t.test")
-
-# ANOVA
-compare_means(RMSE ~ model,  data = model_rmse %>% filter(!model == "Uncorrected"), group.by = c("train", "error_type", "type"), method = "anova")
-
-# Compare to LM
 t_tests <- compare_means(RMSE ~ model, data = model_rmse,
               group.by = c("train", "error_type", "type"), ref.group = "Linear Regression",
               method = "t.test", p.adjust.method = "hochberg")
-
+#Write out comparisons
+write_csv(t_tests, "output/model_comparison.csv")
 
 gg.rmse <- model_rmse  %>%
   left_join(t_tests %>% dplyr::select(train, error_type, type, model = group2, p.adj, p.signif))  %>%
   filter(train == "Test set") %>%
-  filter(!(model == "metacal"& !error_type %in% c("error_alr", "error_clr"))) %>%
+  filter(!(model == "metacal" & !error_type %in% c("ALR", "CLR"))) %>%
  # dplyr::filter(error_type %in% c("error_prop", "error_abs", "error_clr", "error_alr")) %>%
   mutate(
-    error_type = error_type %>%
-      str_remove("error_") %>%
-      str_replace("prop$", "Proportions") %>%
-      str_replace("prop_log$", "Log(Proportions)")%>%
-      str_replace("prop_logit$", "Logit(Proportions)")%>%
-      str_replace("alr$", "ALR")%>%
-      str_replace("clr$", "CLR")%>%
-      str_replace("abs$", "Absolute")%>%
-      str_replace("abs_log$", "Log(Absolute)") %>%
-      factor(levels = c(
+    error_type = error_type %>%  factor(levels = c(
         "Proportions",
-        "Log(Proportions)",
-        "Logit(Proportions)",
+        "Log",
+        "Logit",
         "ALR",
         "CLR",
-        "Absolute",
-        "Log(Absolute)"
+        "Absolute"
       )),
     model = factor(model, levels = c(
       "XGBOOST",
@@ -1412,12 +1551,13 @@ gg.rmse <- model_rmse  %>%
     type = factor(type, levels = c("Relative", "Absolute"))) %>%
   ggplot(aes(x = model, y=RMSE, fill=model))+
   geom_point(position=position_jitter(width = 0.15, height=0),size=1, colour="#d2d2d2", alpha=0.8)+
-  geom_boxplot(width =0.9, alpha=0.6, outlier.colour = NA)+
+  geom_boxplot(width =0.8, alpha=0.6, outlier.colour = NA)+
   geom_text(aes(y=0.4, x = model, label = p.signif), check_overlap = TRUE)+
   scale_fill_brewer(palette="Set2")+
-  facet_grid(error_type~type, drop = TRUE)+ 
+  facet_grid(error_type~type, drop = TRUE, scales="free_y", space="free")+ 
   coord_flip() +
   base_theme +
+  scale_y_continuous(labels = scales::percent_format(accuracy=1))+
   theme(legend.position = "none",
         panel.grid = element_blank())+
   labs(y = "RMSE",
@@ -1426,37 +1566,23 @@ gg.rmse <- model_rmse  %>%
 
 gg.rmse
 
-pdf(file="fig/Fig2_model_comparison.pdf", width = 8, height = 11 , paper="a4")
+pdf(file="fig/Fig3_model_comparison.pdf", width = 8, height = 8, paper="a4")
   plot(gg.rmse)
 try(dev.off(), silent=TRUE)
 
 ```
 
 
-## Check residuals
+## Check residuals & Plot RF fits
 
 ```{r outliers}
 # Plot residuals by sample
 fits %>%
-  ggplot(aes(x  = sample_id, y = residual)) +
+  ggplot(aes(x  = sample_id, y = rsq)) +
   geom_col() + 
   facet_grid(model~.) +
   base_theme
-#
-#tmp1 <- fits %>% 
-#    mutate(out = abs(residual) > quantile(abs(residual), .9975)) %>% 
-#    dplyr::select(sample_id, material_type, fcid, expected.prop, observed.prop, predicted, residual, out, model)
-#
-#ggplot(tmp1, aes(x = predicted, y = residual, colour = out, label = sample_id)) +
-#    geom_point(size = 2, alpha = .7, show.legend = FALSE) + 
-#    # geom_rug(sides = "r", outside = TRUE) +
-#    # coord_cartesian(clip = "off") +
-#    scale_color_viridis_d(end = .7, direction = -1) +
-#    ggrepel::geom_label_repel(
-#        data = filter(tmp1, out == 1), show.legend = FALSE) +
-#    facet_grid(model~.) +
-#    labs(title = "Outlier analysis")
-#
+
 # Look at residuals by taxa 
 fits %>%
   group_by(error_type, model, taxon, seed) %>%
@@ -1470,8 +1596,8 @@ fits %>%
   base_theme 
   
 # Look for just Random forest
-gg.rf_taxon_res <- fits %>%
-  filter(error_type == "error_abs", model == "Random Forest") %>%
+rf_dat <- fits %>%
+  filter(error_type == "Proportions", model == "Random Forest") %>%
   mutate(material_type = material_type %>%
            str_replace("CarpLarval", "Larval Mock") %>%
            str_replace("CarpMock", "Adult Mock") %>% 
@@ -1481,32 +1607,50 @@ gg.rf_taxon_res <- fits %>%
            str_replace("Sp$", "sp.")) %>%
   group_by(taxon, seed, material_type) %>%
   rmse(truth = calibrated, estimate = expected.prop) %>%
-  mutate(RMSE = .estimate) %>%
+  mutate(RMSE = .estimate) 
+
+
+#ANOVA
+compare_means(RMSE ~ taxon, data = rf_dat, group.by = "material_type", method = "anova")
+
+#T-tests
+t_tests <- compare_means(RMSE ~ taxon, data = rf_dat,
+              group.by = "material_type",
+              method = "t.test", p.adjust.method = "hochberg")
+library(rstatix)
+stat.test <- rf_dat %>%
+  group_by(material_type) %>%
+  group_modify(~{
+    aov(RMSE ~ taxon, data = .x) %>%
+    tukey_hsd()
+  })
+  
+
+
+rf_dat  %>%
+  #left_join(t_tests %>% dplyr::select(train, error_type, type, model = group2, p.adj, p.signif))  %>%
   ggplot(aes(x = taxon, y = RMSE, fill=taxon)) + 
   geom_point(position=position_jitter(width = 0.2, height=0), colour="#d2d2d2", alpha=0.8)+
   geom_boxplot(width =0.7, alpha=0.6, outlier.colour = NA)+
+  stat_pvalue_manual(
+    stat.test, label = "p.adj.signif", 
+    y.position = c(29, 35, 39)
+      )+
   facet_grid(~material_type, drop=TRUE,scales="free", space="free" )+
   scale_fill_brewer(palette="Paired")+
+  scale_y_continuous(labels = scales::percent_format(accuracy=1)) +
   base_theme +
   theme(axis.text.x = element_text(face = "italic"))
   
 gg.rf_taxon_res  
 
-# Look at residuals by relative abundance in community
-fits %>%
-    filter(error_type == "error_abs", model == "Random Forest") %>%
-  ggplot(aes(x = expected.prop, y = residual, colour=taxon)) +
-  geom_point(position=position_jitter(width = 0.01, height=0), alpha=0.5) +
-  scale_colour_brewer(palette="Paired")+
-  base_theme 
-
-library(chngpt)
 breakpoint_fit <- fits %>%
-    filter(error_type == "error_abs", model == "Random Forest") %>% 
+    filter(error_type == "Proportions", model == "Random Forest") %>% 
   group_by(model) %>%
   nest() %>%
-  mutate(fits = purrr::map(data, ~chngptm(formula.1=residual~1, formula.2=~expected.prop,
-                                   type="upperhinge", family="gaussian",data = .)),
+  mutate(fits = purrr::map(data, ~chngptm(formula.1=rsq~1, formula.2=~expected.prop,
+                                   type="upperhing", family="gaussian", ci.bootstrap.size	
+=1000, est.method	= "fastgrid", data = .)),
          summary = purrr::map(fits, summary),
          #preds = map2(fits, data, predict),
          aug = purrr::map2(fits, data, function(x,y){
@@ -1522,10 +1666,10 @@ breakpoint_fit <- fits %>%
          coef_info = purrr::map(summary,function(x){ as_tibble(x$coefficients, rownames="term" )})
          )
   
-# Get SE of breakpoints
+# Get SE of breakpoints - Only seems to work for segmented?
 breakpoint_fit %>% 
   unnest(breakpoint_ests) %>% 
- dplyr::select(-where(is.list)) 
+ dplyr::select(-where(is.list))
 
 slope_coefs <- breakpoint_fit %>%
   unnest(coef_info) %>%
@@ -1547,9 +1691,9 @@ break_annot <- dat_pred %>%
   filter(expected.prop == breakpoint) %>%
   dplyr::slice(1) 
 
-gg.quant_limit <- fits %>%
-    filter(error_type == "error_abs", model == "Random Forest") %>%
-  ggplot(aes(x = expected.prop, y = residual, colour=taxon)) +
+gg.quant_limit <-  fits %>%
+    filter(error_type == "Proportions", model == "Random Forest") %>%
+  ggplot(aes(x = expected.prop, y = rsq, colour=taxon)) +
   geom_point(position=position_jitter(width = 0.01, height=0), alpha=0.2) +
   geom_line(data=dat_pred[dat_pred$expected.prop < dat_pred$breakpoint,],
              aes(x=expected.prop, y=preds),  color = 'blue', size=0.7, inherit.aes = FALSE) +
@@ -1559,7 +1703,8 @@ gg.quant_limit <- fits %>%
   geom_vline(data=dat_pred, aes(xintercept = breakpoint), colour="black", linetype = "dashed") +
   geom_text(data = break_annot, aes(x = expected.prop, y = -0.35, label=scales::percent(expected.prop,accuracy = 0.02)),
             colour="black", nudge_x = .1)+
-  scale_x_continuous(labels = scales::percent)+
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1))+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
   facet_grid(~model) +
   scale_colour_brewer(palette="Paired")+
   base_theme +
@@ -1591,18 +1736,15 @@ gg.train_preds <- fits %>%
   left_join(model_anorm) %>%
   distinct() %>%
   filter(train == "Training set") %>%
-  filter(!(model == "metacal"& !error_type %in% c("error_alr", "error_clr"))) %>%
+  filter(!(model == "metacal" & !error_type %in% c("ALR", "CLR"))) %>%
   mutate(error_type = error_type %>%
-      str_remove("error_") %>%
-        str_replace("_", " ")%>%
       factor(levels = c(
-        "prop",
-        "prop log",
-        "prop logit",
-        "alr",
-        "clr",
-        "abs",
-        "abs log"
+        "Proportions",
+        "Log",
+        "Logit",
+        "ALR",
+        "CLR",
+        "Absolute"
       )),
     model = model %>% 
       str_replace("Regression", "Reg") %>%
@@ -1623,7 +1765,7 @@ gg.train_preds <- fits %>%
   facet_grid(error_type~model) +
   base_theme+
   scale_x_continuous(trans = scales::pseudo_log_trans(1e-2), labels=scales::percent,
-                       breaks=c(0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1), expand = c(0,0))+
+                       breaks=c(0.025, 0.1, 0.25, 0.5, 1), limits=c(0,1), expand = c(0,0))+
   scale_y_continuous(trans = scales::pseudo_log_trans(1e-2),
                      labels=scales::percent, breaks=c(0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1), expand = c(0,0))+
   scale_fill_viridis_d()+
@@ -1646,18 +1788,16 @@ gg.test_preds <- fits %>%
   left_join(model_rmse) %>%
   left_join(model_anorm) %>%
   filter(train == "Test set") %>%
-  filter(!(model == "metacal"& !error_type %in% c("error_alr", "error_clr"))) %>%
+  filter(!(model == "metacal" & !error_type %in% c("ALR", "CLR"))) %>%
+  filter(!error_type == "error_abs_log") %>%
   mutate(error_type = error_type %>%
-      str_remove("error_") %>%
-        str_replace("_", " ")%>%
       factor(levels = c(
-        "prop",
-        "prop log",
-        "prop logit",
-        "alr",
-        "clr",
-        "abs",
-        "abs log"
+        "Proportions",
+        "Log",
+        "Logit",
+        "ALR",
+        "CLR",
+        "Absolute"
       )),
     model = model %>% 
       str_replace("Regression", "Reg") %>%
@@ -1678,7 +1818,7 @@ gg.test_preds <- fits %>%
   facet_grid(error_type~model) +
   base_theme+
   scale_x_continuous(trans = scales::pseudo_log_trans(1e-2), labels=scales::percent,
-                       breaks=c(0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1), expand = c(0,0))+
+                       breaks=c(0.025, 0.1, 0.25, 0.5, 1), limits=c(0,1), expand = c(0,0))+
   scale_y_continuous(trans = scales::pseudo_log_trans(1e-2),
                      labels=scales::percent, breaks=c(0.025, 0.05, 0.1, 0.25, 0.5, 1), limits=c(0,1), expand = c(0,0))+
   scale_fill_viridis_d()+
@@ -1701,9 +1841,6 @@ pdf(file="fig/supplementary/RA_bias_fits.pdf", width = 8, height = 11 , paper="a
   plot(gg.train_preds)
   plot(gg.test_preds)
 try(dev.off(), silent=TRUE)
-
-  
-  # Arrange in specific order
 ```
 
 ## Absolute abundances
@@ -1725,18 +1862,16 @@ gg.train_abs <- abs_fits %>%
   left_join(model_anorm) %>%
   distinct()%>%
   filter(train == "Training set") %>%
-    filter(!(model == "metacal"& !error_type %in% c("error_alr", "error_clr"))) %>%
-  mutate(error_type = error_type %>%
-      str_remove("error_") %>%
-        str_replace("_", " ")%>%
+  filter(!(model == "metacal" & !error_type %in% c("ALR", "CLR"))) %>%
+  filter(!error_type == "error_abs_log") %>%
+mutate(error_type = error_type %>%
       factor(levels = c(
-        "prop",
-        "prop log",
-        "prop logit",
-        "alr",
-        "clr",
-        "abs",
-        "abs log"
+        "Proportions",
+        "Log",
+        "Logit",
+        "ALR",
+        "CLR",
+        "Absolute"
       )),
     model = model %>% 
       str_replace("Regression", "Reg") %>%
@@ -1780,18 +1915,16 @@ gg.test_abs <- abs_fits %>%
   left_join(model_anorm) %>%
   distinct()%>%
   filter(train == "Test set") %>%
-    filter(!(model == "metacal"& !error_type %in% c("error_alr", "error_clr"))) %>%
+  filter(!(model == "metacal" & !error_type %in% c("ALR", "CLR"))) %>%
+  filter(!error_type == "error_abs_log") %>%
   mutate(error_type = error_type %>%
-      str_remove("error_") %>%
-        str_replace("_", " ")%>%
       factor(levels = c(
-        "prop",
-        "prop log",
-        "prop logit",
-        "alr",
-        "clr",
-        "abs",
-        "abs log"
+        "Proportions",
+        "Log",
+        "Logit",
+        "ALR",
+        "CLR",
+        "Absolute"
       )),
     model = model %>% 
       str_replace("Regression", "Reg") %>%
@@ -1841,6 +1974,8 @@ try(dev.off(), silent=TRUE)
 ```{r Final model}
 # Could do bar plots, faceted by whether they are in the training set or not
 # Maybe next to it a pre-post correction dot plot
+joint <- readRDS("joint.rds")
+
 set.seed(666)
 joint_split <- joint %>%
  ungroup() %>%
@@ -1856,7 +1991,7 @@ joint_train <- joint %>%
  pivot_longer(starts_with("error"),
               names_to="error_type",
               values_to="error")  %>%
-  filter(error_type == "error_abs") %>%
+  filter(error_type == "error_prop") %>%
   mutate(observed.prop = log(observed_abs),
          expected.prop = log(expected))
 
@@ -1868,7 +2003,7 @@ joint_test <- joint %>%
  pivot_longer(starts_with("error"),
               names_to="error_type",
               values_to="error")  %>%
-  filter(error_type == "error_abs") %>%
+  filter(error_type == "error_prop") %>%
   mutate(observed.prop = log(observed_abs),
          expected.prop = log(expected))
 
@@ -1904,7 +2039,7 @@ ranger_workflow_prop <- finalize_workflow(ranger_workflow_prop, ranger_tune %>%
   select_best("rmse"))
 
 final_fit <- joint_train %>%
-  filter(error_type == "error_abs") %>%
+  filter(error_type == "error_prop") %>%
   filter(expected > 0) %>%
   group_by(error_type) %>%
   nest() %>%
@@ -2232,13 +2367,15 @@ jacknife_results <- fit_jacknifes %>%
 gg.jacknife_box <- jacknife_results %>%
   mutate(taxon = taxon %>% 
            str_replace("_", " ") %>%
-           str_replace("Sp$", "sp.")) %>%
+           str_replace("Sp$", "sp.") %>%
+           str_replace("nr.dimidiatus", "truncatus")) %>%
   group_by(size, id, taxon) %>%
   rmse(truth = observed.prop, estimate = predicted) %>%
   ggplot(aes(x = size, y = .estimate, group=size, fill=taxon)) +
   geom_point(position=position_jitter(width = 0.10, height=0), colour="#d2d2d2", alpha=0.8)+
   geom_boxplot(width =0.8, lwd=0.5, alpha=0.6, outlier.colour = NA)+
   scale_fill_brewer(palette="Paired") +
+  scale_y_continuous(labels=scales::percent_format(accuracy = 1)) +
   base_theme +
   theme(strip.text = element_text(face="italic"))+
   facet_wrap(~taxon, ncol=1)+
@@ -2249,14 +2386,90 @@ gg.jacknife_box
 
 
 # Try doing this by taxon!
-fig3a <- gg.quant_limit /(gg.rf_taxon_res + theme(axis.title.x = element_blank())) 
-fig3 <- fig3a - gg.jacknife_box + plot_layout(widths = c(2,0.8)) + plot_annotation(tag_levels = "A")
+#fig3a <- gg.quant_limit /(gg.rf_taxon_res + theme(axis.title.x = element_blank())) 
+#fig3 <- fig3a - gg.jacknife_box + plot_layout(widths = c(2,0.8)) + plot_annotation(tag_levels = "A")
 
-fig3
+fig4 <- gg.rf_taxon_res - gg.jacknife_box + plot_layout(widths = c(2,1)) + plot_annotation(tag_levels = "A")
+
+fig4
 
 #Save figure
-pdf(file="fig/Fig3_residual_summary.pdf", width = 11, height = 8 , paper="a4r")
-  plot(fig3)
+pdf(file="fig/Fig4_residual_summary.pdf", width = 11, height = 8 , paper="a4r")
+  plot(fig4)
 try(dev.off(), silent=TRUE)
 
+```
+
+
+# Number of mismatches
+
+```{r primer mismatch}
+# Get PHMM of full folmer region
+coi_model <- readRDS("reference/folmer_fullength_model.rds")
+
+primers <- tribble(
+  ~Fname, ~Fprimer, ~Rname, ~Rprimer,
+  "fwhF2",  "GGDACWGGWTGAACWGTWTAYCCHCC", "fwhR2n","GTRATWGCHCCDGCTARWACWGG",
+  ) %>%
+    left_join(.$Fprimer %>% unique() %>% purrr::map(get_binding_position, coi_model, tryrc = TRUE, minscore=8) %>%
+    bind_rows() %>%
+    rename_all(. %>% paste0("F",.)), by="Fprimer") %>%
+    left_join(.$Rprimer %>% unique() %>% purrr::map(get_binding_position, coi_model, tryrc = TRUE, minscore=8) %>%
+    bind_rows() %>%
+    rename_all(. %>% paste0("R",.)), by="Rprimer")
+
+# Read in sequences
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+# Subset to Nitidulidae
+niti <- names(seqs) %>%
+  str_split_fixed(";", n=8) %>%
+  as_tibble() %>%
+  filter(V6 == "Nitidulidae") %>%
+  tidyr::unite(everything(),col="out", sep=";") %>%
+  pull(out)
+
+seqs <- seqs[names(seqs) %in% niti]
+
+# Add primers to seqs
+primers.dna <- insect::char2dna(c("GGDACWGGWTGAACWGTWTAYCCHCC", rc("GTRATWGCHCCDGCTARWACWGG")))
+names(primers.dna) <- c("fwhF2", "fwhR2n")
+
+#Join to seqs
+seqs <- c(seqs, primers.dna)
+
+# Trim seqs to Fprimer bind region and get primer edit distance
+aligned <- taxreturn::map_to_model(seqs, coi_model, minscore = 0, shave= TRUE, pad=TRUE, check_indels=FALSE, maxNs=Inf, cores=1, quiet=FALSE, extra = "fill")
+
+#Transform to DNAstringSet
+aligned <- aligned %>% as.list %>% as.character %>% lapply(., paste0, collapse = "") %>% 
+            unlist %>% DNAStringSet
+
+# Check alignment
+DECIPHER::BrowseSeqs(aligned)
+
+#Get forward dist
+Fprimerdist <- Biostrings::subseq(aligned, start=primers$Fstart[1], end = primers$Fend[1]) %>%
+  DECIPHER::DistanceMatrix(includeTerminalGaps = TRUE)%>% #hamming with ambiguities
+  as.data.frame() %>%
+  rownames_to_column("Fprimer") %>%
+  pivot_longer(cols=-Fprimer,
+               names_to="taxon",
+               values_to="Fdist") %>%
+  filter(Fprimer=="fwhF2", !taxon %in% names(primers.dna)) %>%
+  filter(Fdist < 0.5) %>% #Filter bad alignments
+  tidyr::separate(taxon, into=c("Acc" ,"Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep=";")
+
+#Get reverse dist
+Rprimerdist <- Biostrings::subseq(aligned[lengths(aligned) > primers$Rend[1]],
+                     start=primers$Rstart[1], end = primers$Rend[1]) %>%
+  DECIPHER::DistanceMatrix(includeTerminalGaps = TRUE)%>% #hamming with ambiguities
+  as.data.frame() %>%
+  rownames_to_column("Rprimer") %>%
+  pivot_longer(cols=-Rprimer,
+               names_to="taxon",
+               values_to="Rdist") %>%
+  filter(Rprimer=="fwhR2n", !taxon %in% names(primers.dna)) %>%
+  filter(Rdist < 0.5)%>% #Filter bad alignments
+  tidyr::separate(taxon, into=c("Acc" ,"Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep=";")
 ```

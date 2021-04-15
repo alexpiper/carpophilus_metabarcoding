@@ -273,25 +273,12 @@ modelling_func <- function(train, test, cv, error_type, model_type, val_err = TR
   } else (stop("type must be 'ratio' or 'prop' "))
   
   # Tune model if required
-  if(!model_type %in% c("lm", "xgboost")){
-    model_tune <- tune_grid(model_workflow, resamples = cv, grid = 20)
+  if(!model_type %in% c("lm")){
+    #Tune grid using a latin hypercube design
+    model_tune <- tune_grid(model_workflow, resamples = cv, grid = 40)
     model_workflow <- finalize_workflow(model_workflow, model_tune %>% select_best("rmse"))
     tune_res <- collect_metrics(model_tune)
     
-  }else if (model_type == "xgboost"){
-    xgb_grid <- grid_latin_hypercube(
-      tree_depth(),
-      min_n(),
-      loss_reduction(),
-      sample_size = sample_prop(),
-      finalize(mtry(), train),
-      learn_rate(),
-      size = 30
-    )
-    model_tune <- tune_grid(model_workflow, resamples = cv, grid = xgb_grid)
-    model_workflow <- finalize_workflow(model_workflow, model_tune %>%
-                                          select_best("rmse"))
-    tune_res <- collect_metrics(model_tune)
   }else {
     tune_res <- NULL
   }

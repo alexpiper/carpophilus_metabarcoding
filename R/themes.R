@@ -1,5 +1,5 @@
 # Define themes
-base_theme <- theme_minimal()+
+base_theme <- theme_bw()+
   theme(
     #strip.background = element_blank(),
     strip.background = element_rect(colour = "black", fill = "lightgray"),
