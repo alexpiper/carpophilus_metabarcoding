@@ -1,43 +1,45 @@
 ---
-title: "Metabarcoding bias"
-output: html_document
+title: "Carpophilus Metabarcoding"
+subtitle: "Statistical analysis"
+author: "Alexander Piper"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    highlighter: null
+    theme: "flatly"
+    code_download: true
+    toc: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+    df_print: paged    
+  pdf_document: default
 editor_options: 
   chunk_output_type: console
 ---
+
+```{r setup, include=FALSE}
+# Knitr global setup - change eval to true to run code
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE, fig.show = "hold", fig.keep = "all")
+opts_chunk$set(dev = 'png')
+```
+
 # Introduction
+This document contains the code required to reproduce the statistical analyses for our manuscript: Piper, Rako, Semeraro, Cogan, Blacket & Cunningham (In prep). The inputs for this workflow are:
 
-## Analysis structure
+* A sequence table of detected amplicon sequence variants (ASVs) and which sample they were detected in
+* A taxonomy table containing the taxonomy assigned to each ASV
+* A phylogenetic tree of the detected ASVs
+* A sample data sheet containing metadata for each sample
 
-Part 1 - Cleanup & Filtering
-
-Part 1 - Comparison of 4 primers for bias
-
-Part 2 - Evaluation of different bias modellign strategies
-
-- naive mean on proportions approach
-- Metacal center function
-  - proj
-  - gm
-  - rss
-- lm on compositional vectors
-- lm on expected / observed
-- lm with CLR in advance?
-- glmnet: multinomial regression with regularization (ie Lasso model)
-- nnet::multinomial neural network regression
-- multinomial regression with random effects
-- Poisson regression with random effects
-- Bayesian multinomial logistic normal models
-  - Stan
-  - Pibble from stray package
-  
-Look at spike in control
-
-Pick the model that reduces the residual mean standard error (RMSE) the most
-
-Should be able to do this within a tidymodels framework with bootsrapping
+These inputs were generated during the bioinformatic analysis
 
 ## Load packages
-```{r setup}
+
+This workflow depends on various R packages to be installed prior to running.
+
+```{r load packages}
 #Set required packages
 .cran_packages <- c("tidyverse",
                     "tidymodels",
@@ -53,6 +55,9 @@ Should be able to do this within a tidymodels framework with bootsrapping
                     "chngpt",
                     "ggnewscale",
                     "ggpubr",
+                    "glmnet",
+                    "kernlab",
+                    "ranger",
                     "magick")
 .bioc_packages <- c("dada2",
                     "phyloseq", 
@@ -73,13 +78,14 @@ if(any(!.inst)) {
 
 sapply(c(.cran_packages,.bioc_packages), require, character.only = TRUE)
 
-# Github packages
-#devtools::install_github("alexpiper/taxreturn")
-#devtools::install_github("mikemc/speedyseq")
-#devtools::install_github("mikemc/metacal")
-
+# Install and load github packages
+devtools::install_github("alexpiper/taxreturn")
 library(taxreturn)
+devtools::install_github("alexpiper/seqateurs")
+library(seqateurs)
+devtools::install_github("mikemc/speedyseq")
 library(speedyseq)
+devtools::install_github("mikemc/metacal")
 library(metacal)
 
 #Source themes
@@ -104,7 +110,7 @@ seqs <- DNAStringSet(colnames(seqtab))
 names(seqs) <- seqs
 phy <- read.tree("output/order_constrained_rerooted.nwk")
 
-##### Rename problematic samples
+##### Rename samples that were mixed up in the original sample sheet
 rownames(seqtab)  <- rownames(seqtab) %>%
  str_replace_all("CM10-", "CM9REP-") %>%
  str_replace_all("CM11-", "CM10REP-") %>%
@@ -159,8 +165,6 @@ write_csv(samdf, "sample_data/sample_info2.csv")
 samdf <- read.csv("sample_data/sample_info2.csv", header=TRUE) %>%
   magrittr::set_rownames(.$sample_id)
 
-# Will probably need to rename the seqtabs and append the flowcell number onto the samples before they are merged
-
 ## ---- phyloseq ----
 ps <- phyloseq(tax_table(tax), 
                sample_data(samdf),
@@ -187,7 +191,7 @@ tax_table(ps)[,8][which(tax_table(ps)[,8]=="Carpophilus nr.dimidiatus")] <- "Car
 tax_table(ps)[,8][which(tax_table(ps)[,8]=="Brachypeplus Sp1")] <- "Brachypeplus Sp"
 tax_table(ps)[,8][which(tax_table(ps)[,8]=="Brachypeplus Sp2")] <- "Brachypeplus Sp"
 
-#Subset full dataset to Carpophilus samples of interest
+#Subset full run to only Carpophilus samples of interest
 ps <- ps %>%
   subset_taxa(
     Phylum == "Arthropoda" &
@@ -238,48 +242,45 @@ seqateurs::ps_to_fasta(ps, "output/all_taxa.fasta", seqnames = "Species")
 
 ## Minimum read filtering
 
+Here we will remove any samples with below 1000 reads
 ```{r minimum reads}
-#Plot rarefaction curve
-rare <- otu_table(ps) %>%
-  as("matrix") %>%
-  rarecurve(step=10000) %>%
-  purrr::map_dfr(., function(x){
-  b <- as.data.frame(x)
-  b <- data.frame(OTU = b[,1], count = rownames(b))
-  b$count <- as.numeric(gsub("N", "",  b$count))
-  nm <- names(attr(x, "Subsample"))
-  b$sample_id <- nm[!nm==""]
-  return(b)
-  })%>%
-  left_join(sample_data(ps)%>%
-    as("matrix") %>%
-    as_tibble() %>%
-      dplyr::select(sample_id, fcid) %>%
-      distinct())%>%
-  dplyr::filter(fcid %in% c("CB3DR", "HLVKYDMXX"))
-
 # threshold for read removal
 threshold = 1000
 
-gg.rare <- rare %>%
-  ggplot() +
+#Create rarefaction curve
+rare <- otu_table(ps) %>%
+  as("matrix") %>%
+  rarecurve(step=max(sample_sums(ps))/100) %>%
+  purrr::map(function(x){
+    b <- as.data.frame(x)
+    b <- data.frame(OTU = b[,1], count = rownames(b))
+    b$count <- as.numeric(gsub("N", "",  b$count))
+    return(b)
+  }) %>%
+  purrr::set_names(sample_names(ps)[rowSums(otu_table(ps) %>% as("matrix")) > 0]) %>%
+  bind_rows(.id="sample_id")
+
+gg.rare <- ggplot(data = rare)+
   geom_line(aes(x = count, y = OTU, group=sample_id), alpha=0.5)+
   geom_point(data = rare %>% 
                group_by(sample_id) %>% 
                top_n(1, count),
              aes(x = count, y = OTU, colour=(count > threshold))) +
-  scale_x_log10(labels =  scales::label_number_si()) +
+  geom_label(data = rare %>% 
+               group_by(sample_id) %>% 
+               top_n(1, count),
+             aes(x = count, y = OTU,label=sample_id, colour=(count > threshold)),
+             hjust=-0.05)+
+  scale_x_continuous(labels =  scales::scientific_format()) +
   geom_vline(xintercept=threshold, linetype="dashed") +
-  facet_wrap(fcid~., scales="free", ncol=1)+
-  base_theme+
-  theme(legend.position = "bottom")+
-  labs(x = "Sequence reads",
-       y = "Observed ASV's",
-       colour = "Sample retained?")
+  labs(colour = "Sample kept?") +
+  xlab("Sequence reads") +
+  ylab("Observed ASV's")
+
 gg.rare
 
 #Write out figure
-pdf(file="fig/supplementary/rarefaction.pdf", width = 8, height = 6 , paper="a4r")
+pdf(file="fig/rarefaction.pdf", width = 11, height = 8 , paper="a4r")
   plot(gg.rare)
 try(dev.off(), silent=TRUE)
 
@@ -297,7 +298,6 @@ setdiff(sample_names(ps), sample_names(ps1))
 
 ```{r sum taxa}
 exp_samples <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
-  dplyr::rename(sample_name = X1) %>%
   pivot_longer(-sample_name,
                names_to= "taxon",
                values_to= "expected") %>%
@@ -433,10 +433,8 @@ unique(summary_dat$Species)[!unique(summary_dat$Species) %in% tree$tip.label]
 
 unique(rownames(p1dat))[!unique(rownames(p1dat)) %in% tree$tip.label]
 
-
-# Plot tree, with taxon names an a
+# Plot tree, with taxon names 
 known_taxa <- exp_samples$taxon %>% str_replace("_", " ") %>% unique()
-
 
 p1dat <- ps1 %>%
     speedyseq::tax_glom(taxrank = "Species") %>%
@@ -490,8 +488,7 @@ gg.phylo <- gheatmap(circ, p1dat, offset=0, width=.4, color="gray20",
     new_scale_colour() +
     geom_tippoint(aes(colour=taxa_kept), size=3)+
     scale_colour_manual(values=c("#d2d2d2", "#1b9e77")) +
-    labs(colour =
-    "Morphologically \nrecorded?")
+    labs(colour = "Morphologically \nrecorded?")
 
 gg.phylo
 
@@ -503,6 +500,8 @@ try(dev.off(), silent=TRUE)
 ```
 
 # Taxon filtering
+
+Here we will remove any taxa that were not included in the mock communities
 
 ```{r filter taxa}
 get_taxa_unique(ps1, "Order")
@@ -531,9 +530,9 @@ ps2 %>%
             total = sum(Abundance))
 ```
 
-
-
 ## Success of replicates
+
+Check how many replicated PCR's were successful
 
 ```{r rep success }
 exp_samples <- read_csv("data/HLVKYDMXX/SampleSheet.csv", skip = 19) %>%
@@ -628,15 +627,10 @@ pdf(file="fig/supplementary/replicate_success.pdf", width = 10, height = 8 , pap
 try(dev.off(), silent=TRUE)
 ```
 
-# Error consistency
-
-Look at bias consistency between replicates
-
-# Visualise errors between samples & reps
+## Consistency of bias between samples & repliciates
 
 ```{r Consistency between reps}
 exp <- read_csv("sample_data/expected_quant_carpophilus.csv") %>%
-  dplyr::rename(sample_name = X1) %>%
   pivot_longer(-sample_name,
                names_to= "taxon",
                values_to= "expected") %>%
@@ -733,7 +727,6 @@ gg.mat_err <- joint  %>%
 
 gg.mat_err
 
-
 # Deviation in taxon specific errors between samples
 error_variation <- joint %>% 
   #filter(fcid == "HLVKYDMXX")%>%
@@ -793,11 +786,9 @@ gg.err_var <- error_variation %>%
 gg.err_var
 
 ## Visualise errors in proportions between different replicates
-# Original errors
 error_rmse <- joint %>%
   group_by(extrep, amp_rep) %>%
   rmse(truth = expected.prop, estimate = observed.prop) %>%
-  #rmse(truth = logit(expected.prop), estimate = logit(observed.prop)) %>%
   dplyr::select(RMSE = .estimate, extrep, amp_rep)
 
 error_anorm <- joint %>%
@@ -848,15 +839,12 @@ sample_data(ps.merged) <- sample_data(ps2) %>%
   dplyr::filter(!duplicated(sample_name)) %>%
   magrittr::set_rownames(.$sample_name)
 
-ps3 <- ps.merged
 ```
 
-
-# Get expected and observed across all runs
-
+# Get expected and observed taxa
 
 ```{r make joint}
-ps_bias <- ps3
+ps_bias <- ps.merged
 
 #Get Observed
 sam <- speedyseq::psmelt(ps_bias) %>%
@@ -913,7 +901,7 @@ joint <- sam %>%
   }) %>%
   filter(!sample_name=="CML6") #Bad sample
 
-saveRDS(joint, "joint.rds")
+saveRDS(joint, "output/joint.rds")
 ```
 
 
@@ -1020,7 +1008,6 @@ gg.pw_error_rat <- joint %>%
 
 ```{r splits}
 # Make training / testing splits  ------------------------------------------------------------
-
 set.seed(666)
 
 # Get 100 different random seeds
@@ -1319,43 +1306,24 @@ modelling_func <- function(train, test, cv, error_type, model_type, val_err = TR
                 tune_res = list(tune_res))
   return(out)
 }
+
 # Fit modelling function  ------------------------------------------------------------
 
+# Create multiprocess session
 cores <- 2
 future::plan(future::multiprocess, workers = cores)
 
-future::plan(sequential)
 fits_all <- splits %>%
-  filter(error_type %in% c("error_prop"), model_type %in% c("svm", "lm", "uncorrected")) %>%
   mutate(
     fits = furrr::future_pmap(list(train, test, cv, error_type, model_type), modelling_func)
   ) %>% 
   unnest(fits)
 
 # write out fits_all
-saveRDS(fits_all, "fits_all.rds")
+#saveRDS(fits_all, "output/fits_all.rds")
 
-test_splits <- splits %>%
-  filter(error_type %in% c("error_prop_logit"), model_type %in% c("lasso")) 
-
-train <- test_splits$train[[1]]
-test <- test_splits$test[[1]]
-cv <- test_splits$cv[[1]]
-error_type <- test_splits$error_type[[1]]
-model_type <- test_splits$model_type[[1]]
-
-# Test
-fits_all <- splits %>%
-  group_by(model_type, error_type ) %>%
-  dplyr::slice(1) %>%
-  ungroup() %>%
-  filter(model_type == "lasso") %>% # error_type == "error_abs_log"
-  #  filter(error_type == c("error_clr", "error_alr", "error_abs", "error_prop")) %>%
-    mutate(
-        fits = purrr::pmap(list(train, test, cv, error_type, model_type), modelling_func)
-    ) %>% 
-    unnest(fits)
-
+# Close multiprocess
+future::plan(sequential)
 ```
 
 
@@ -1368,7 +1336,7 @@ To determine the models predictive ability to new data, we also determine these 
 
 ```{r evaluate fits}
 # Read back in fits_all
-fits_all <- readRDS("fits_all.rds")
+fits_all <- readRDS("output/fits_all.rds")
  
 # Get fits for training set
 all_fits_train <- fits_all %>%
@@ -1474,7 +1442,6 @@ fits <- all_fits_train %>%
       str_replace("alr$", "ALR")%>%
       str_replace("clr$", "CLR")%>%
       str_replace("abs$", "Absolute"))
-
 
 # Absolute abundances 
 abs_fits <- all_fits_train %>%
@@ -1617,25 +1584,12 @@ compare_means(RMSE ~ taxon, data = rf_dat, group.by = "material_type", method = 
 t_tests <- compare_means(RMSE ~ taxon, data = rf_dat,
               group.by = "material_type",
               method = "t.test", p.adjust.method = "hochberg")
-library(rstatix)
-stat.test <- rf_dat %>%
-  group_by(material_type) %>%
-  group_modify(~{
-    aov(RMSE ~ taxon, data = .x) %>%
-    tukey_hsd()
-  })
-  
 
-
-rf_dat  %>%
+gg.rf_taxon_res <- rf_dat  %>%
   #left_join(t_tests %>% dplyr::select(train, error_type, type, model = group2, p.adj, p.signif))  %>%
   ggplot(aes(x = taxon, y = RMSE, fill=taxon)) + 
   geom_point(position=position_jitter(width = 0.2, height=0), colour="#d2d2d2", alpha=0.8)+
   geom_boxplot(width =0.7, alpha=0.6, outlier.colour = NA)+
-  stat_pvalue_manual(
-    stat.test, label = "p.adj.signif", 
-    y.position = c(29, 35, 39)
-      )+
   facet_grid(~material_type, drop=TRUE,scales="free", space="free" )+
   scale_fill_brewer(palette="Paired")+
   scale_y_continuous(labels = scales::percent_format(accuracy=1)) +
@@ -1643,77 +1597,6 @@ rf_dat  %>%
   theme(axis.text.x = element_text(face = "italic"))
   
 gg.rf_taxon_res  
-
-breakpoint_fit <- fits %>%
-    filter(error_type == "Proportions", model == "Random Forest") %>% 
-  group_by(model) %>%
-  nest() %>%
-  mutate(fits = purrr::map(data, ~chngptm(formula.1=rsq~1, formula.2=~expected.prop,
-                                   type="upperhing", family="gaussian", ci.bootstrap.size	
-=1000, est.method	= "fastgrid", data = .)),
-         summary = purrr::map(fits, summary),
-         #preds = map2(fits, data, predict),
-         aug = purrr::map2(fits, data, function(x,y){
-           preds <- predict(x,y)
-           out <- y
-           out$preds <- preds
-           out$res <- NA
-           out$res[!is.na(out$preds)] <- resid(x)
-           return(out)
-           }),
-         breakpoint = purrr::map(fits, "chngpt"),
-         breakpoint_ests = purrr::map(summary, function(x){ as.data.frame(t(x$chngpt))}),
-         coef_info = purrr::map(summary,function(x){ as_tibble(x$coefficients, rownames="term" )})
-         )
-  
-# Get SE of breakpoints - Only seems to work for segmented?
-breakpoint_fit %>% 
-  unnest(breakpoint_ests) %>% 
- dplyr::select(-where(is.list))
-
-slope_coefs <- breakpoint_fit %>%
-  unnest(coef_info) %>%
-  dplyr::select(model, term, est, std_err = `Std. Error*`,
-                lower = `(lower`, upper = `upper)`,
-                pval = `p.value*`, -where(is.list)) %>%
-  mutate(signif = pval < 0.05) 
-
-dat_pred <- breakpoint_fit %>%
-  unnest(aug, breakpoint)%>%
-  dplyr::select(-where(is.list))  %>%
-  drop_na() %>%
-  left_join(slope_coefs %>%
-              dplyr::select(model,term, signif, est) %>%
-              pivot_wider(names_from=term, values_from=c(signif, est))) 
-
-
-break_annot <- dat_pred %>% 
-  filter(expected.prop == breakpoint) %>%
-  dplyr::slice(1) 
-
-gg.quant_limit <-  fits %>%
-    filter(error_type == "Proportions", model == "Random Forest") %>%
-  ggplot(aes(x = expected.prop, y = rsq, colour=taxon)) +
-  geom_point(position=position_jitter(width = 0.01, height=0), alpha=0.2) +
-  geom_line(data=dat_pred[dat_pred$expected.prop < dat_pred$breakpoint,],
-             aes(x=expected.prop, y=preds),  color = 'blue', size=0.7, inherit.aes = FALSE) +
-  geom_line(data=dat_pred[dat_pred$expected.prop >= dat_pred$breakpoint,],
-            aes(x=expected.prop, y=preds),  color = 'blue', size=0.7, inherit.aes = FALSE) +
-  geom_point(data=break_annot, aes(x=expected.prop, y=preds),size=2,  color = 'blue', inherit.aes = FALSE) +
-  geom_vline(data=dat_pred, aes(xintercept = breakpoint), colour="black", linetype = "dashed") +
-  geom_text(data = break_annot, aes(x = expected.prop, y = -0.35, label=scales::percent(expected.prop,accuracy = 0.02)),
-            colour="black", nudge_x = .1)+
-  scale_x_continuous(labels = scales::percent_format(accuracy = 1))+
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
-  facet_grid(~model) +
-  scale_colour_brewer(palette="Paired")+
-  base_theme +
-  labs(x = "Relative abundance in community",
-       y = "Residual error")
-
-gg.quant_limit
-
-gg.rf_taxon_res + gg.quant_limit + plot_layout(widths = c(2,1))
 ```
 
 
@@ -1971,10 +1854,12 @@ try(dev.off(), silent=TRUE)
 
 # Fit final model
 
+Fit the final random forest model to the dataset
+
 ```{r Final model}
 # Could do bar plots, faceted by whether they are in the training set or not
 # Maybe next to it a pre-post correction dot plot
-joint <- readRDS("joint.rds")
+joint <- readRDS("output/joint.rds")
 
 set.seed(666)
 joint_split <- joint %>%
@@ -2118,6 +2003,8 @@ final_results_test %>%
 
 # Final model calibration
 
+Calibrate all measurements using the final Random Forest model
+
 ```{r final bars}
 final_results_all <- final_results_train %>%
   mutate(train = "Training set") %>%
@@ -2203,6 +2090,8 @@ try(dev.off(), silent=TRUE)
 
 ## PCA
 
+See the effect of calibration on the clustering of samples
+
 ```{r pca}
 # Calibrated abs
 pca_dat <- final_results_all  %>%
@@ -2230,9 +2119,8 @@ pca_dat <- final_results_all  %>%
     as.matrix() %>%
     zCompositions::cmultRepl(method="BL", output="p-counts") %>%
     as.matrix() %>%
-    CoDaSeq::codaSeq.clr() %>%
+    clr() %>%
     vegdist(method="euclidean") %>%
-    #vegdist(method="bray") %>%
     as.matrix() %>%
     prcomp() 
     
@@ -2281,6 +2169,8 @@ try(dev.off(), silent=TRUE)
 
 
 # Jacknife RMSE estimates
+
+See how bias estimates change with reduced number of training samples
 
 ```{r jacknife}
 ranger_workflow_prop2 <- 
@@ -2402,6 +2292,8 @@ try(dev.off(), silent=TRUE)
 
 
 # Number of mismatches
+
+Can bias be explained by the number of mismatching bases to the primers?
 
 ```{r primer mismatch}
 # Get PHMM of full folmer region

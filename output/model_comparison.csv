@@ -1,0 +1,137 @@
+train,error_type,type,.y.,group1,group2,p,p.adj,p.format,p.signif,method
+Test set,Absolute,Absolute,RMSE,Linear Regression,LASSO Regression,0.8361947881568984,0.99,0.83619,ns,T-test
+Test set,Absolute,Absolute,RMSE,Linear Regression,metacal,6.665864112872251e-43,7.1e-41,< 2e-16,****,T-test
+Test set,Absolute,Absolute,RMSE,Linear Regression,Random Forest,0.670106040197392,0.99,0.67011,ns,T-test
+Test set,Absolute,Absolute,RMSE,Linear Regression,SVM,0.9455846880683032,0.99,0.94558,ns,T-test
+Test set,Absolute,Absolute,RMSE,Linear Regression,Uncorrected,1.1137884351163552e-28,1.1e-26,< 2e-16,****,T-test
+Test set,Absolute,Absolute,RMSE,Linear Regression,XGBOOST,0.24965992401615625,0.99,0.24966,ns,T-test
+Training set,Absolute,Absolute,RMSE,Linear Regression,LASSO Regression,0.07215768424293133,0.99,0.07216,ns,T-test
+Training set,Absolute,Absolute,RMSE,Linear Regression,metacal,6.365798370062866e-154,8.099999999999996e-152,< 2e-16,****,T-test
+Training set,Absolute,Absolute,RMSE,Linear Regression,Random Forest,1.9191968721671094e-70,2.0999999999999997e-68,< 2e-16,****,T-test
+Training set,Absolute,Absolute,RMSE,Linear Regression,SVM,8.076717768132852e-4,0.062,0.00081,***,T-test
+Training set,Absolute,Absolute,RMSE,Linear Regression,Uncorrected,9.439547780855668e-190,1.1999999999999998e-187,< 2e-16,****,T-test
+Training set,Absolute,Absolute,RMSE,Linear Regression,XGBOOST,2.6387994421728168e-18,2.2e-16,< 2e-16,****,T-test
+Test set,Absolute,Relative,RMSE,Linear Regression,LASSO Regression,0.8361947881568984,0.99,0.83619,ns,T-test
+Test set,Absolute,Relative,RMSE,Linear Regression,Random Forest,0.670106040197392,0.99,0.67011,ns,T-test
+Test set,Absolute,Relative,RMSE,Linear Regression,SVM,0.9455846880683032,0.99,0.94558,ns,T-test
+Test set,Absolute,Relative,RMSE,Linear Regression,Uncorrected,1.1137884351163552e-28,1.1e-26,< 2e-16,****,T-test
+Test set,Absolute,Relative,RMSE,Linear Regression,XGBOOST,0.24965992401615625,0.99,0.24966,ns,T-test
+Training set,Absolute,Relative,RMSE,Linear Regression,LASSO Regression,0.07215768424293133,0.99,0.07216,ns,T-test
+Training set,Absolute,Relative,RMSE,Linear Regression,Random Forest,1.9191968721671094e-70,2.0999999999999997e-68,< 2e-16,****,T-test
+Training set,Absolute,Relative,RMSE,Linear Regression,SVM,8.076717768132852e-4,0.062,0.00081,***,T-test
+Training set,Absolute,Relative,RMSE,Linear Regression,Uncorrected,9.439547780855668e-190,1.1999999999999998e-187,< 2e-16,****,T-test
+Training set,Absolute,Relative,RMSE,Linear Regression,XGBOOST,2.6387994421728168e-18,2.2e-16,< 2e-16,****,T-test
+Test set,ALR,Absolute,RMSE,Linear Regression,LASSO Regression,0.860414392340806,0.99,0.86041,ns,T-test
+Test set,ALR,Absolute,RMSE,Linear Regression,metacal,0.9637570113666092,0.99,0.96376,ns,T-test
+Test set,ALR,Absolute,RMSE,Linear Regression,Random Forest,0.9334501920381036,0.99,0.93345,ns,T-test
+Test set,ALR,Absolute,RMSE,Linear Regression,SVM,0.11037291325247843,0.99,0.11037,ns,T-test
+Test set,ALR,Absolute,RMSE,Linear Regression,Uncorrected,3.1146195010986683e-4,0.025,0.00031,***,T-test
+Test set,ALR,Absolute,RMSE,Linear Regression,XGBOOST,0.9862159008651094,0.99,0.98622,ns,T-test
+Training set,ALR,Absolute,RMSE,Linear Regression,LASSO Regression,0.454427417932147,0.99,0.45443,ns,T-test
+Training set,ALR,Absolute,RMSE,Linear Regression,metacal,0.32616588361107246,0.99,0.32617,ns,T-test
+Training set,ALR,Absolute,RMSE,Linear Regression,Random Forest,1.5141251019190835e-43,1.7e-41,< 2e-16,****,T-test
+Training set,ALR,Absolute,RMSE,Linear Regression,SVM,0.002829542406925712,0.21,0.00283,**,T-test
+Training set,ALR,Absolute,RMSE,Linear Regression,Uncorrected,3.644513866399198e-99,4.4999999999999985e-97,< 2e-16,****,T-test
+Training set,ALR,Absolute,RMSE,Linear Regression,XGBOOST,4.78842606997505e-22,4.3e-20,< 2e-16,****,T-test
+Test set,ALR,Relative,RMSE,Linear Regression,LASSO Regression,0.860414392340806,0.99,0.86041,ns,T-test
+Test set,ALR,Relative,RMSE,Linear Regression,metacal,0.9637570113666092,0.99,0.96376,ns,T-test
+Test set,ALR,Relative,RMSE,Linear Regression,Random Forest,0.9334501920381036,0.99,0.93345,ns,T-test
+Test set,ALR,Relative,RMSE,Linear Regression,SVM,0.11037291325247843,0.99,0.11037,ns,T-test
+Test set,ALR,Relative,RMSE,Linear Regression,Uncorrected,3.1146195010986683e-4,0.025,0.00031,***,T-test
+Test set,ALR,Relative,RMSE,Linear Regression,XGBOOST,0.9862159008651094,0.99,0.98622,ns,T-test
+Training set,ALR,Relative,RMSE,Linear Regression,LASSO Regression,0.454427417932147,0.99,0.45443,ns,T-test
+Training set,ALR,Relative,RMSE,Linear Regression,metacal,0.32616588361107246,0.99,0.32617,ns,T-test
+Training set,ALR,Relative,RMSE,Linear Regression,Random Forest,1.5141251019190835e-43,1.7e-41,< 2e-16,****,T-test
+Training set,ALR,Relative,RMSE,Linear Regression,SVM,0.002829542406925712,0.21,0.00283,**,T-test
+Training set,ALR,Relative,RMSE,Linear Regression,Uncorrected,3.644513866399198e-99,4.4999999999999985e-97,< 2e-16,****,T-test
+Training set,ALR,Relative,RMSE,Linear Regression,XGBOOST,4.78842606997505e-22,4.3e-20,< 2e-16,****,T-test
+Test set,CLR,Absolute,RMSE,Linear Regression,LASSO Regression,0.9925741364338151,0.99,0.99257,ns,T-test
+Test set,CLR,Absolute,RMSE,Linear Regression,metacal,0.9813697590826262,0.99,0.98137,ns,T-test
+Test set,CLR,Absolute,RMSE,Linear Regression,Random Forest,0.988365830697345,0.99,0.98837,ns,T-test
+Test set,CLR,Absolute,RMSE,Linear Regression,SVM,0.24898800599682866,0.99,0.24899,ns,T-test
+Test set,CLR,Absolute,RMSE,Linear Regression,Uncorrected,4.453666738946804e-4,0.035,0.00045,***,T-test
+Test set,CLR,Absolute,RMSE,Linear Regression,XGBOOST,0.4999371610059383,0.99,0.49994,ns,T-test
+Training set,CLR,Absolute,RMSE,Linear Regression,LASSO Regression,0.7238561990867133,0.99,0.72386,ns,T-test
+Training set,CLR,Absolute,RMSE,Linear Regression,metacal,0.9496078710435134,0.99,0.94961,ns,T-test
+Training set,CLR,Absolute,RMSE,Linear Regression,Random Forest,8.249282479476201e-91,9.899999999999998e-89,< 2e-16,****,T-test
+Training set,CLR,Absolute,RMSE,Linear Regression,SVM,3.22310441536029e-5,0.0027,3.2e-05,****,T-test
+Training set,CLR,Absolute,RMSE,Linear Regression,Uncorrected,7.91867368309166e-96,9.7e-94,< 2e-16,****,T-test
+Training set,CLR,Absolute,RMSE,Linear Regression,XGBOOST,1.8262087671700182e-34,1.8999999999999998e-32,< 2e-16,****,T-test
+Test set,CLR,Relative,RMSE,Linear Regression,LASSO Regression,0.9925741364338151,0.99,0.99257,ns,T-test
+Test set,CLR,Relative,RMSE,Linear Regression,metacal,0.9813697590826262,0.99,0.98137,ns,T-test
+Test set,CLR,Relative,RMSE,Linear Regression,Random Forest,0.988365830697345,0.99,0.98837,ns,T-test
+Test set,CLR,Relative,RMSE,Linear Regression,SVM,0.24898800599682866,0.99,0.24899,ns,T-test
+Test set,CLR,Relative,RMSE,Linear Regression,Uncorrected,4.453666738946804e-4,0.035,0.00045,***,T-test
+Test set,CLR,Relative,RMSE,Linear Regression,XGBOOST,0.4999371610059383,0.99,0.49994,ns,T-test
+Training set,CLR,Relative,RMSE,Linear Regression,LASSO Regression,0.7238561990867133,0.99,0.72386,ns,T-test
+Training set,CLR,Relative,RMSE,Linear Regression,metacal,0.9496078710435134,0.99,0.94961,ns,T-test
+Training set,CLR,Relative,RMSE,Linear Regression,Random Forest,8.249282479476201e-91,9.899999999999998e-89,< 2e-16,****,T-test
+Training set,CLR,Relative,RMSE,Linear Regression,SVM,3.22310441536029e-5,0.0027,3.2e-05,****,T-test
+Training set,CLR,Relative,RMSE,Linear Regression,Uncorrected,7.91867368309166e-96,9.7e-94,< 2e-16,****,T-test
+Training set,CLR,Relative,RMSE,Linear Regression,XGBOOST,1.8262087671700182e-34,1.8999999999999998e-32,< 2e-16,****,T-test
+Test set,Log,Absolute,RMSE,Linear Regression,LASSO Regression,0.7896992152080823,0.99,0.78970,ns,T-test
+Test set,Log,Absolute,RMSE,Linear Regression,metacal,1.0187766746601382e-39,1.1e-37,< 2e-16,****,T-test
+Test set,Log,Absolute,RMSE,Linear Regression,Random Forest,0.15393603804182993,0.99,0.15394,ns,T-test
+Test set,Log,Absolute,RMSE,Linear Regression,SVM,0.016899986708725518,0.99,0.01690,*,T-test
+Test set,Log,Absolute,RMSE,Linear Regression,Uncorrected,3.444954165484612e-25,3.1e-23,< 2e-16,****,T-test
+Test set,Log,Absolute,RMSE,Linear Regression,XGBOOST,0.4137850783111465,0.99,0.41379,ns,T-test
+Training set,Log,Absolute,RMSE,Linear Regression,LASSO Regression,0.9094277233685373,0.99,0.90943,ns,T-test
+Training set,Log,Absolute,RMSE,Linear Regression,metacal,1.1130606604063949e-147,1.3999999999999995e-145,< 2e-16,****,T-test
+Training set,Log,Absolute,RMSE,Linear Regression,Random Forest,2.2077351675655336e-79,2.4999999999999994e-77,< 2e-16,****,T-test
+Training set,Log,Absolute,RMSE,Linear Regression,SVM,0.8295306080685859,0.99,0.82953,ns,T-test
+Training set,Log,Absolute,RMSE,Linear Regression,Uncorrected,9.17123916237078e-192,1.1999999999999997e-189,< 2e-16,****,T-test
+Training set,Log,Absolute,RMSE,Linear Regression,XGBOOST,1.456428822803138e-27,1.4e-25,< 2e-16,****,T-test
+Test set,Log,Relative,RMSE,Linear Regression,LASSO Regression,0.7896992152080823,0.99,0.78970,ns,T-test
+Test set,Log,Relative,RMSE,Linear Regression,Random Forest,0.15393603804182993,0.99,0.15394,ns,T-test
+Test set,Log,Relative,RMSE,Linear Regression,SVM,0.016899986708725518,0.99,0.01690,*,T-test
+Test set,Log,Relative,RMSE,Linear Regression,Uncorrected,3.444954165484612e-25,3.1e-23,< 2e-16,****,T-test
+Test set,Log,Relative,RMSE,Linear Regression,XGBOOST,0.4137850783111465,0.99,0.41379,ns,T-test
+Training set,Log,Relative,RMSE,Linear Regression,LASSO Regression,0.9094277233685373,0.99,0.90943,ns,T-test
+Training set,Log,Relative,RMSE,Linear Regression,Random Forest,2.2077351675655336e-79,2.4999999999999994e-77,< 2e-16,****,T-test
+Training set,Log,Relative,RMSE,Linear Regression,SVM,0.8295306080685859,0.99,0.82953,ns,T-test
+Training set,Log,Relative,RMSE,Linear Regression,Uncorrected,9.17123916237078e-192,1.1999999999999997e-189,< 2e-16,****,T-test
+Training set,Log,Relative,RMSE,Linear Regression,XGBOOST,1.456428822803138e-27,1.4e-25,< 2e-16,****,T-test
+Test set,Logit,Absolute,RMSE,Linear Regression,LASSO Regression,0.8981422480731215,0.99,0.89814,ns,T-test
+Test set,Logit,Absolute,RMSE,Linear Regression,metacal,2.8645460418956e-32,3.0000000000000003e-030,< 2e-16,****,T-test
+Test set,Logit,Absolute,RMSE,Linear Regression,Random Forest,0.31670828392985817,0.99,0.31671,ns,T-test
+Test set,Logit,Absolute,RMSE,Linear Regression,SVM,0.046421871233215554,0.99,0.04642,*,T-test
+Test set,Logit,Absolute,RMSE,Linear Regression,Uncorrected,1.1184048767367413e-27,1.0999999999999999e-25,< 2e-16,****,T-test
+Test set,Logit,Absolute,RMSE,Linear Regression,XGBOOST,0.7369760181367151,0.99,0.73698,ns,T-test
+Training set,Logit,Absolute,RMSE,Linear Regression,LASSO Regression,0.5488173540627792,0.99,0.54882,ns,T-test
+Training set,Logit,Absolute,RMSE,Linear Regression,metacal,5.046268053448912e-87,5.999999999999999e-85,< 2e-16,****,T-test
+Training set,Logit,Absolute,RMSE,Linear Regression,Random Forest,9.441329859439621e-83,1.0999999999999999e-80,< 2e-16,****,T-test
+Training set,Logit,Absolute,RMSE,Linear Regression,SVM,0.0018720543005267657,0.14,0.00187,**,T-test
+Training set,Logit,Absolute,RMSE,Linear Regression,Uncorrected,2.6348938393758e-191,3.499999999999999e-189,< 2e-16,****,T-test
+Training set,Logit,Absolute,RMSE,Linear Regression,XGBOOST,1.0505292531076375e-27,9.999999999999999e-26,< 2e-16,****,T-test
+Test set,Logit,Relative,RMSE,Linear Regression,LASSO Regression,0.8981422480731215,0.99,0.89814,ns,T-test
+Test set,Logit,Relative,RMSE,Linear Regression,Random Forest,0.31670828392985817,0.99,0.31671,ns,T-test
+Test set,Logit,Relative,RMSE,Linear Regression,SVM,0.046421871233215554,0.99,0.04642,*,T-test
+Test set,Logit,Relative,RMSE,Linear Regression,Uncorrected,1.1184048767367413e-27,1.0999999999999999e-25,< 2e-16,****,T-test
+Test set,Logit,Relative,RMSE,Linear Regression,XGBOOST,0.7369760181367151,0.99,0.73698,ns,T-test
+Training set,Logit,Relative,RMSE,Linear Regression,LASSO Regression,0.5488173540627792,0.99,0.54882,ns,T-test
+Training set,Logit,Relative,RMSE,Linear Regression,Random Forest,9.441329859439621e-83,1.0999999999999999e-80,< 2e-16,****,T-test
+Training set,Logit,Relative,RMSE,Linear Regression,SVM,0.0018720543005267657,0.14,0.00187,**,T-test
+Training set,Logit,Relative,RMSE,Linear Regression,Uncorrected,2.6348938393758e-191,3.499999999999999e-189,< 2e-16,****,T-test
+Training set,Logit,Relative,RMSE,Linear Regression,XGBOOST,1.0505292531076375e-27,9.999999999999999e-26,< 2e-16,****,T-test
+Test set,Proportions,Absolute,RMSE,Linear Regression,LASSO Regression,0.8322780424264509,0.99,0.83228,ns,T-test
+Test set,Proportions,Absolute,RMSE,Linear Regression,metacal,6.665864112872251e-43,7.1e-41,< 2e-16,****,T-test
+Test set,Proportions,Absolute,RMSE,Linear Regression,Random Forest,0.4299521536344819,0.99,0.42995,ns,T-test
+Test set,Proportions,Absolute,RMSE,Linear Regression,SVM,0.8822561654027739,0.99,0.88226,ns,T-test
+Test set,Proportions,Absolute,RMSE,Linear Regression,Uncorrected,1.1137884351163552e-28,1.1e-26,< 2e-16,****,T-test
+Test set,Proportions,Absolute,RMSE,Linear Regression,XGBOOST,0.5317511055129143,0.99,0.53175,ns,T-test
+Training set,Proportions,Absolute,RMSE,Linear Regression,LASSO Regression,0.09648394055640137,0.99,0.09648,ns,T-test
+Training set,Proportions,Absolute,RMSE,Linear Regression,metacal,6.365798370062866e-154,8.099999999999996e-152,< 2e-16,****,T-test
+Training set,Proportions,Absolute,RMSE,Linear Regression,Random Forest,7.741395598509213e-79,8.699999999999998e-77,< 2e-16,****,T-test
+Training set,Proportions,Absolute,RMSE,Linear Regression,SVM,0.02362750624637193,0.99,0.02363,*,T-test
+Training set,Proportions,Absolute,RMSE,Linear Regression,Uncorrected,9.439547780855668e-190,1.1999999999999998e-187,< 2e-16,****,T-test
+Training set,Proportions,Absolute,RMSE,Linear Regression,XGBOOST,1.3408195473116055e-21,1.2e-19,< 2e-16,****,T-test
+Test set,Proportions,Relative,RMSE,Linear Regression,LASSO Regression,0.8322780424264509,0.99,0.83228,ns,T-test
+Test set,Proportions,Relative,RMSE,Linear Regression,Random Forest,0.4299521536344819,0.99,0.42995,ns,T-test
+Test set,Proportions,Relative,RMSE,Linear Regression,SVM,0.8822561654027739,0.99,0.88226,ns,T-test
+Test set,Proportions,Relative,RMSE,Linear Regression,Uncorrected,1.1137884351163552e-28,1.1e-26,< 2e-16,****,T-test
+Test set,Proportions,Relative,RMSE,Linear Regression,XGBOOST,0.5317511055129143,0.99,0.53175,ns,T-test
+Training set,Proportions,Relative,RMSE,Linear Regression,LASSO Regression,0.09648394055640137,0.99,0.09648,ns,T-test
+Training set,Proportions,Relative,RMSE,Linear Regression,Random Forest,7.741395598509213e-79,8.699999999999998e-77,< 2e-16,****,T-test
+Training set,Proportions,Relative,RMSE,Linear Regression,SVM,0.02362750624637193,0.99,0.02363,*,T-test
+Training set,Proportions,Relative,RMSE,Linear Regression,Uncorrected,9.439547780855668e-190,1.1999999999999998e-187,< 2e-16,****,T-test
+Training set,Proportions,Relative,RMSE,Linear Regression,XGBOOST,1.3408195473116055e-21,1.2e-19,< 2e-16,****,T-test
