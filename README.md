@@ -6,6 +6,6 @@ This repository contains the code required for reproducing the analyses presente
 
 Analysis All analyses presented in the manuscript can be found in rmd files in the root directory or rendered below:
 
-Bioinformatics
+[Bioinformatics](https://alexpiper.github.io/carpophilus_metabarcoding/bioinformatics.html)
 
-Statistical analyses
+[Statistical analyses](https://alexpiper.github.io/carpophilus_metabarcoding/statistics.html)
