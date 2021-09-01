@@ -33,7 +33,7 @@ This document contains the code required to reproduce the bioinformatic analyses
 * A phylogenetic tree of the detected ASVs
 * A sample data sheet containing metadata for each sample
 
-These outputs are required for the statistical analysis
+These outputs are required for the [Statistical analyses](https://alexpiper.github.io/carpophilus_metabarcoding/statistics.html)
 
 # Demultiplex libraries
 
@@ -1176,4 +1176,4 @@ write.tree(tree2, "output/order_constrained_rerooted.nwk")
 
 # Conclusion
 
-The outputs of this workflow can now be used for the statistical analysis
+The outputs of this workflow can now be used for the [Statistical analyses](https://alexpiper.github.io/carpophilus_metabarcoding/statistics.html)

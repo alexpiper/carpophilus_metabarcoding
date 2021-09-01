@@ -33,7 +33,7 @@ This document contains the code required to reproduce the statistical analyses f
 * A phylogenetic tree of the detected ASVs
 * A sample data sheet containing metadata for each sample
 
-These inputs were generated during the bioinformatic analysis
+These inputs were generated during the [bioinformatic analysis](https://alexpiper.github.io/carpophilus_metabarcoding/bioinformatics.html)
 
 ## Load packages
 
