@@ -813,8 +813,7 @@ saveRDS(seqtab_cut, "output/rds/seqtab_cut.rds")
 
 
 #Filter for homology with the target marker
-fwh_ref <-  ape::read.dna("reference/fwh_insecta_aligned_curated.fasta", format="fasta")
-model <- aphid::derivePHMM(fwh_ref)
+model <- readRDS(url("https://zenodo.org/record/5370132/files/folmer_fullength_model.rds?download=1"))
 
 seqs <- as.DNAbin(DNAStringSet(colnames(seqtab_cut)))
 names(seqs) <- colnames(seqtab_cut)
@@ -902,11 +901,10 @@ Where taxonomic clashes occurred at the species level due to ties between BLAST 
 seqtab_final <- readRDS("output/rds/seqtab_final.rds")
 ranks <-  c("Root","Kingdom", "Phylum","Class", "Order", "Family", "Genus","Species") # ranks of interest
 
-# Testing
-trainingSet <- readRDS("reference/classifiers/idtaxa_bftrimmed.rds")
+
+trainingSet <- readRDS(url("https://zenodo.org/record/5370132/files/merged_arthropoda_idtaxa.rds?download=1"))
 
 #Classify using IDTAXA
-#trainingSet <- readRDS("reference/idtaxa.rds")
 dna <- DNAStringSet(getSequences(seqtab_final)) # Create a DNAStringSet from the ASVs
 ids <- IdTaxa(dna, trainingSet, processors=8, threshold = 60, verbose=TRUE) 
 saveRDS(ids, "ids.rds")
@@ -940,7 +938,8 @@ seqs <- insect::char2dna(colnames(seqtab_final))
 names(seqs) <- colnames(seqtab_final)
 
 # Top hit with BLAST
-blast_spp <- blast_assign_species(query=seqs,db="reference/classifiers/insecta_hierarchial_bftrimmed.fa.gz", identity=97, coverage=95, evalue=1e06, maxtargetseqs=5, maxhsp=5, ranks=c("Root", "Kingdom", "Phylum","Class", "Order", "Family", "Genus","Species"), delim=";") %>%
+download.file("https://zenodo.org/record/5370132/files/merged_final.fa.gz?download=1", destfile = "reference/merged_final.fa.gz")
+blast_spp <- blast_assign_species(query=seqs,db="reference/merged_final.fa.gz", identity=97, coverage=95, evalue=1e06, maxtargetseqs=5, maxhsp=5, ranks=c("Root", "Kingdom", "Phylum","Class", "Order", "Family", "Genus","Species"), delim=";") %>%
   dplyr::rename(blast_genus = Genus, blast_spp = Species) %>%
   dplyr::filter(!is.na(blast_spp))
 

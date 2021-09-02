@@ -1335,9 +1335,9 @@ To determine the models predictive ability to new data, we also determine these 
 
 
 ```{r evaluate fits}
-# Read back in fits_all
-fits_all <- readRDS("output/fits_all.rds")
- 
+## OPTIONAL: Download pre-trained models
+download.file("https://zenodo.org/record/5370132/files/fits_all.rds?download=1", destfile="output/fits_all.rds")
+
 # Get fits for training set
 all_fits_train <- fits_all %>%
   unnest(pred_train, train) %>%
