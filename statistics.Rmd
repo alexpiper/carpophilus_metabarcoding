@@ -841,7 +841,7 @@ sample_data(ps.merged) <- sample_data(ps2) %>%
 
 ```
 
-# Get expected and observed taxa
+# Combine expected and observed taxa
 
 ```{r make joint}
 ps_bias <- ps.merged
