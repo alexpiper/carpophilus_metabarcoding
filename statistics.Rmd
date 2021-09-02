@@ -1336,7 +1336,7 @@ To determine the models predictive ability to new data, we also determine these 
 
 ```{r evaluate fits}
 ## OPTIONAL: Download pre-trained models
-fits_all <- readRDS(url("https://zenodo.org/record/5370132/files/fits_all.rds?download=1"))
+#fits_all <- readRDS(url("https://zenodo.org/record/5370132/files/fits_all.rds?download=1"))
 
 # Get fits for training set
 all_fits_train <- fits_all %>%
@@ -2186,7 +2186,7 @@ ranger_workflow_prop2 <- finalize_workflow(ranger_workflow_prop2, tibble(
 samples <- unique(joint_train$sample_id)
 
 boot_df <- joint_train %>%
-  filter(error_type == "error_abs") %>%
+  filter(error_type == "error_prop") %>%
   filter(expected > 0)
 
 jacknifes <- seq(1,length(samples),1) %>%
@@ -2200,12 +2200,12 @@ jacknifes <- seq(1,length(samples),1) %>%
           mutate(id = z,
                  size=y)
       })
-  })%>%
+  }) %>%
   group_by(id,size) %>%
   nest() %>%
   dplyr::rename(train = data) %>%
   bind_cols(joint_test %>%
-    filter(error_type == "error_abs") %>%
+    filter(error_type == "error_prop") %>%
       nest(everything()))%>%
   dplyr::rename(test = data) 
 
@@ -2235,8 +2235,10 @@ fit_jacknifes <- jacknifes %>%
   group_by(size) %>%
   mutate(n_boots = n())
 
-#saveRDS(fit_jacknifes, "output/jacknifes.rds")
-fit_jacknifes <- readRDS("output/jacknifes.rds")
+saveRDS(fit_jacknifes, "output/jacknifes.rds")
+
+## OPTIONAL: Download pre-fit jacknife models
+fit_jacknifes <- readRDS(url("https://zenodo.org/record/5370132/files/jacknifes.rds?download=1"))
 
 jacknife_results <- fit_jacknifes %>%
   unnest(pred_test)%>%
@@ -2288,80 +2290,4 @@ pdf(file="fig/Fig4_residual_summary.pdf", width = 11, height = 8 , paper="a4r")
   plot(fig4)
 try(dev.off(), silent=TRUE)
 
-```
-
-
-# Number of mismatches
-
-Can bias be explained by the number of mismatching bases to the primers?
-
-```{r primer mismatch}
-# Get PHMM of full folmer region
-coi_model <- readRDS("reference/folmer_fullength_model.rds")
-
-primers <- tribble(
-  ~Fname, ~Fprimer, ~Rname, ~Rprimer,
-  "fwhF2",  "GGDACWGGWTGAACWGTWTAYCCHCC", "fwhR2n","GTRATWGCHCCDGCTARWACWGG",
-  ) %>%
-    left_join(.$Fprimer %>% unique() %>% purrr::map(get_binding_position, coi_model, tryrc = TRUE, minscore=8) %>%
-    bind_rows() %>%
-    rename_all(. %>% paste0("F",.)), by="Fprimer") %>%
-    left_join(.$Rprimer %>% unique() %>% purrr::map(get_binding_position, coi_model, tryrc = TRUE, minscore=8) %>%
-    bind_rows() %>%
-    rename_all(. %>% paste0("R",.)), by="Rprimer")
-
-# Read in sequences
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-# Subset to Nitidulidae
-niti <- names(seqs) %>%
-  str_split_fixed(";", n=8) %>%
-  as_tibble() %>%
-  filter(V6 == "Nitidulidae") %>%
-  tidyr::unite(everything(),col="out", sep=";") %>%
-  pull(out)
-
-seqs <- seqs[names(seqs) %in% niti]
-
-# Add primers to seqs
-primers.dna <- insect::char2dna(c("GGDACWGGWTGAACWGTWTAYCCHCC", rc("GTRATWGCHCCDGCTARWACWGG")))
-names(primers.dna) <- c("fwhF2", "fwhR2n")
-
-#Join to seqs
-seqs <- c(seqs, primers.dna)
-
-# Trim seqs to Fprimer bind region and get primer edit distance
-aligned <- taxreturn::map_to_model(seqs, coi_model, minscore = 0, shave= TRUE, pad=TRUE, check_indels=FALSE, maxNs=Inf, cores=1, quiet=FALSE, extra = "fill")
-
-#Transform to DNAstringSet
-aligned <- aligned %>% as.list %>% as.character %>% lapply(., paste0, collapse = "") %>% 
-            unlist %>% DNAStringSet
-
-# Check alignment
-DECIPHER::BrowseSeqs(aligned)
-
-#Get forward dist
-Fprimerdist <- Biostrings::subseq(aligned, start=primers$Fstart[1], end = primers$Fend[1]) %>%
-  DECIPHER::DistanceMatrix(includeTerminalGaps = TRUE)%>% #hamming with ambiguities
-  as.data.frame() %>%
-  rownames_to_column("Fprimer") %>%
-  pivot_longer(cols=-Fprimer,
-               names_to="taxon",
-               values_to="Fdist") %>%
-  filter(Fprimer=="fwhF2", !taxon %in% names(primers.dna)) %>%
-  filter(Fdist < 0.5) %>% #Filter bad alignments
-  tidyr::separate(taxon, into=c("Acc" ,"Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep=";")
-
-#Get reverse dist
-Rprimerdist <- Biostrings::subseq(aligned[lengths(aligned) > primers$Rend[1]],
-                     start=primers$Rstart[1], end = primers$Rend[1]) %>%
-  DECIPHER::DistanceMatrix(includeTerminalGaps = TRUE)%>% #hamming with ambiguities
-  as.data.frame() %>%
-  rownames_to_column("Rprimer") %>%
-  pivot_longer(cols=-Rprimer,
-               names_to="taxon",
-               values_to="Rdist") %>%
-  filter(Rprimer=="fwhR2n", !taxon %in% names(primers.dna)) %>%
-  filter(Rdist < 0.5)%>% #Filter bad alignments
-  tidyr::separate(taxon, into=c("Acc" ,"Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep=";")
 ```
