@@ -1004,7 +1004,7 @@ gg.pw_error_rat <- joint %>%
        y = "Error in taxon ratios")
 ```
 
-# Compare bias models
+# Train bias models
 
 ```{r splits}
 # Make training / testing splits  ------------------------------------------------------------
@@ -1336,7 +1336,7 @@ To determine the models predictive ability to new data, we also determine these 
 
 ```{r evaluate fits}
 ## OPTIONAL: Download pre-trained models
-download.file("https://zenodo.org/record/5370132/files/fits_all.rds?download=1", destfile="output/fits_all.rds")
+fits_all <- readRDS(url("https://zenodo.org/record/5370132/files/fits_all.rds?download=1"))
 
 # Get fits for training set
 all_fits_train <- fits_all %>%
