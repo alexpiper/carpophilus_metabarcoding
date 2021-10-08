@@ -352,7 +352,6 @@ summary_dat %>%
 summary_dat %>%
   summarise(n_extracts = n_distinct(extract_id), n_samples = n_distinct(sample_name), n_reps = n_distinct(sample_id))
 
-
 # Spread of reads
 summary_dat %>%
   group_by(extract_id, fcid) %>%
@@ -416,9 +415,7 @@ speedyseq::psmelt(ps1) %>%
   arrange(Rank)
 
 
-# Phylogeny of taxaa
-library(ggtree)
-library(ggnewscale)
+# Phylogeny of taxa
 
 tree <- ps1 %>%
       speedyseq::tax_glom(taxrank = "Species")%>%
@@ -1336,7 +1333,7 @@ To determine the models predictive ability to new data, we also determine these 
 
 ```{r evaluate fits}
 ## OPTIONAL: Download pre-trained models
-#fits_all <- readRDS(url("https://zenodo.org/record/5370132/files/fits_all.rds?download=1"))
+fits_all <- readRDS(url("https://zenodo.org/record/5370132/files/fits_all.rds?download=1"), options(timeout = 5*60))
 
 # Get fits for training set
 all_fits_train <- fits_all %>%
@@ -1485,7 +1482,6 @@ model_rmse <- fits %>%
   mutate(RMSE = .estimate)
 
 # Compare to baseline linear regression model
-library(ggpubr)
 t_tests <- compare_means(RMSE ~ model, data = model_rmse,
               group.by = c("train", "error_type", "type"), ref.group = "Linear Regression",
               method = "t.test", p.adjust.method = "hochberg")
@@ -2238,7 +2234,7 @@ fit_jacknifes <- jacknifes %>%
 saveRDS(fit_jacknifes, "output/jacknifes.rds")
 
 ## OPTIONAL: Download pre-fit jacknife models
-fit_jacknifes <- readRDS(url("https://zenodo.org/record/5370132/files/jacknifes.rds?download=1"))
+fit_jacknifes <- readRDS(url("https://zenodo.org/record/5370132/files/jacknifes.rds?download=1"), options(timeout = 5*60))
 
 jacknife_results <- fit_jacknifes %>%
   unnest(pred_test)%>%
@@ -2275,11 +2271,6 @@ gg.jacknife_box <- jacknife_results %>%
        y = "RMSE")
 
 gg.jacknife_box
-
-
-# Try doing this by taxon!
-#fig3a <- gg.quant_limit /(gg.rf_taxon_res + theme(axis.title.x = element_blank())) 
-#fig3 <- fig3a - gg.jacknife_box + plot_layout(widths = c(2,0.8)) + plot_annotation(tag_levels = "A")
 
 fig4 <- gg.rf_taxon_res - gg.jacknife_box + plot_layout(widths = c(2,1)) + plot_annotation(tag_levels = "A")
 
